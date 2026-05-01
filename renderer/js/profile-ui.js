@@ -63,17 +63,14 @@
       await window.electronAPI.profileUpdate({
         consents: { bugReports: !!(cbBugs && cbBugs.checked), tos: true },
       });
-      window.electronAPI.profileOpenSignup();
-      // Keep overlay open with hint — user will return after deep link.
-      _showSignupHint();
+      _showInlineForm('register');
     });
 
     btnLogin && btnLogin.addEventListener('click', async () => {
       await window.electronAPI.profileUpdate({
         consents: { bugReports: !!(cbBugs && cbBugs.checked), tos: !!(cbTos && cbTos.checked) },
       });
-      window.electronAPI.profileOpenLogin();
-      _showSignupHint();
+      _showInlineForm('login');
     });
 
     btnDev && btnDev.addEventListener('click', async () => {
@@ -102,6 +99,120 @@
   function _showSignupHint() {
     const hint = $('welcomeSignupHint');
     if (hint) hint.style.display = 'block';
+  }
+
+  // ─── Inline login/register form (no browser) ───
+  function _showInlineForm(mode) {
+    const welcomeEl = $('welcomeOverlay');
+    const settingsEl = $('settingsProfileCard');
+
+    // If welcome overlay is visible, insert form there; otherwise settings card
+    const isWelcome = (welcomeEl && welcomeEl.style.display !== 'none');
+    const card = isWelcome ? welcomeEl : settingsEl;
+    if (!card) return;
+
+    const isReg = mode === 'register';
+
+    // Store original content so we can restore on "Back"
+    const originalHTML = card.getAttribute('data-orig-html');
+    if (!originalHTML) {
+      card.setAttribute('data-orig-html', card.innerHTML);
+    }
+
+    card.innerHTML = `
+      <div class="welcome-modal glass">
+        <div class="profile-inline-form">
+          <h3 style="margin-bottom:0.5rem">${isReg ? 'Регистрация' : 'Вход в аккаунт'}</h3>
+          <p style="color:var(--text2);font-size:0.85rem;margin-bottom:1rem">
+            ${isReg ? 'Создайте аккаунт для P2P со-стрима и друзей' : 'Введите данные для входа'}
+          </p>
+          <div id="inlineFormError" style="display:none;color:var(--error);font-size:0.85rem;margin-bottom:0.75rem"></div>
+          ${isReg ? `
+            <div class="form-group">
+              <label>Email</label>
+              <input type="email" id="inlineEmail" placeholder="you@example.com" />
+            </div>
+            <div class="form-group">
+              <label>Имя пользователя</label>
+              <input type="text" id="inlineUsername" placeholder="streamer42" maxlength="24" />
+            </div>
+          ` : `
+            <div class="form-group">
+              <label>Email или имя пользователя</label>
+              <input type="text" id="inlineLogin" placeholder="you@example.com" />
+            </div>
+          `}
+          <div class="form-group">
+            <label>Пароль</label>
+            <input type="password" id="inlinePassword" placeholder="Минимум 8 символов" />
+          </div>
+          <div class="profile-actions" style="margin-top:1rem">
+            <button class="btn btn-accent" id="inlineSubmit" style="width:100%">${isReg ? 'Создать аккаунт' : 'Войти'}</button>
+            <button class="btn-link" id="inlineBack" style="margin-top:0.5rem;font-size:0.85rem">← Назад</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const errEl = $('inlineFormError');
+    const submitBtn = $('inlineSubmit');
+    const backBtn = $('inlineBack');
+
+    backBtn && backBtn.addEventListener('click', () => {
+      const saved = card.getAttribute('data-orig-html');
+      if (saved) {
+        card.innerHTML = saved;
+        card.removeAttribute('data-orig-html');
+        // Re-wire welcome buttons since innerHTML was restored
+        if (isWelcome) _wireWelcome();
+      } else {
+        _refresh();
+      }
+    });
+
+    submitBtn && submitBtn.addEventListener('click', async () => {
+      submitBtn.disabled = true;
+      submitBtn.textContent = isReg ? 'Регистрация...' : 'Вход...';
+      errEl.style.display = 'none';
+
+      let result;
+      if (isReg) {
+        const email = ($('inlineEmail') || {}).value || '';
+        const username = ($('inlineUsername') || {}).value || '';
+        const password = ($('inlinePassword') || {}).value || '';
+        if (!email || !username || !password || password.length < 8) {
+          errEl.textContent = 'Заполните все поля (пароль от 8 символов)';
+          errEl.style.display = 'block';
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Создать аккаунт';
+          return;
+        }
+        result = await window.electronAPI.profileRegister({ email, username, password });
+      } else {
+        const login = ($('inlineLogin') || {}).value || '';
+        const password = ($('inlinePassword') || {}).value || '';
+        if (!login || !password) {
+          errEl.textContent = 'Введите логин и пароль';
+          errEl.style.display = 'block';
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Войти';
+          return;
+        }
+        result = await window.electronAPI.profileLogin({ login, password });
+      }
+
+      if (result && result.success) {
+        try { window.SBSounds && window.SBSounds.play('success'); } catch (e) {}
+        _hideWelcome();
+        await _refresh();
+      } else {
+        errEl.textContent = (result && result.error) || 'Ошибка';
+        errEl.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.textContent = isReg ? 'Создать аккаунт' : 'Войти';
+        try { window.SBSounds && window.SBSounds.play('error'); } catch (e) {}
+      }
+    });
   }
 
   // ─── Profile section inside the Settings modal ───
@@ -145,8 +256,9 @@
         ${_profile.registered
           ? `<button class="btn" id="profileBtnOpenWeb">Открыть профиль на сайте</button>
              <button class="btn" id="profileBtnLogout">Выйти</button>`
-          : `<button class="btn btn-accent" id="profileBtnSignup">Регистрация на сайте</button>
-             <button class="btn" id="profileBtnLogin">Войти</button>`
+          : `<button class="btn btn-accent" id="profileBtnSignup">Регистрация</button>
+             <button class="btn" id="profileBtnLogin">Войти</button>
+             <button class="btn-link" id="profileBtnOpenSite" style="margin-top:0.5rem;font-size:0.8rem;color:var(--accent)">или через сайт →</button>`
         }
       </div>
       <div class="profile-bug-status" id="profileBugStatus"></div>
@@ -178,9 +290,11 @@
     });
 
     const bSignup = $('profileBtnSignup');
-    bSignup && bSignup.addEventListener('click', () => window.electronAPI.profileOpenSignup());
+    bSignup && bSignup.addEventListener('click', () => _showInlineForm('register'));
     const bLogin = $('profileBtnLogin');
-    bLogin && bLogin.addEventListener('click', () => window.electronAPI.profileOpenLogin());
+    bLogin && bLogin.addEventListener('click', () => _showInlineForm('login'));
+    const bSite = $('profileBtnOpenSite');
+    bSite && bSite.addEventListener('click', () => window.electronAPI.profileOpenLogin());
     const bWeb = $('profileBtnOpenWeb');
     bWeb && bWeb.addEventListener('click', () => window.electronAPI.profileOpenPage());
     const bLogout = $('profileBtnLogout');

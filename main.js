@@ -32,6 +32,8 @@ if (!IS_PACKAGED) {
   app.commandLine.appendSwitch('disable-site-isolation');
 }
 app.commandLine.appendSwitch('enable-features', 'WebRtcAllowInputVolumeAdjustments,DesktopCaptureMediaAudio');
+// Memory reduction flags
+app.commandLine.appendSwitch('disable-features', 'MediaRouter,DialMediaRouteProvider,TranslateUI,OptimizationGuideModelDownloading,OptimizationTargeting,OptimizationHints');
 
 // Single instance lock — prevents multiple StreamBro windows competing for audio/video devices
 const gotLock = app.requestSingleInstanceLock();
@@ -40,7 +42,6 @@ if (!gotLock) {
 }
 
 let mainWindow;
-let signalingServerProcess = null;
 let ffmpegRecProcess = null;
 let ffmpegStreamProcess = null;
 let ffmpegStreamReconnectTimer = null;
@@ -64,7 +65,7 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       webgl: true,
-      experimentalFeatures: true,
+      experimentalFeatures: true, // required for getDisplayMedia + captureStream
       spellcheck: false,
     },
     icon: path.join(__dirname, 'assets', IS_PACKAGED ? 'icon.ico' : 'icon.png'),
@@ -232,24 +233,115 @@ app.on('activate', () => {
   if (mainWindow === null) createWindow();
 });
 
-// --- Signaling Server ---
+// --- Signaling Server (runs in-process to save ~80MB RAM) ---
+
+let _signalingWss = null;
+let _signalingCleanup = null;
 
 function startSignalingServer() {
-  if (signalingServerProcess) return 'already_running';
-  const serverPath = path.join(__dirname, 'signaling-server', 'server.js');
-  // In packaged app, spawn from app.asar.unpacked — see electron-builder config
-  signalingServerProcess = spawn(process.execPath, [serverPath], {
-    env: { ...process.env, SIGNALING_PORT: '7890', ELECTRON_RUN_AS_NODE: '1' },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  signalingServerProcess.stdout.on('data', (data) => { if (!IS_PACKAGED) console.log('[Сигналинг]', data.toString().trim()); });
-  signalingServerProcess.stderr.on('data', (data) => { console.error('[Сигналинг Ошибка]', data.toString().trim()); });
-  signalingServerProcess.on('close', (code) => { if (!IS_PACKAGED) console.log(`[Сигналинг] Завершён с кодом ${code}`); signalingServerProcess = null; });
-  return 'started';
+  if (_signalingWss) return 'already_running';
+  try {
+    const { WebSocketServer } = require('ws');
+    const crypto = require('crypto');
+    const PORT = parseInt(process.env.SIGNALING_PORT || '7890');
+    const wss = new WebSocketServer({ port: PORT });
+    const rooms = new Map();
+    const peerCreateTimes = new Map();
+    const ROOM_CREATE_COOLDOWN = 5000;
+
+    function generateRoomCode() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let code = '';
+      for (let i = 0; i < 4; i++) {
+        if (i > 0) code += '-';
+        for (let j = 0; j < 4; j++) code += chars[Math.floor(Math.random() * chars.length)];
+      }
+      return code;
+    }
+    function sendTo(ws, data) { if (ws.readyState === 1) ws.send(JSON.stringify(data)); }
+    function cleanupRoom(code) {
+      const room = rooms.get(code);
+      if (room && room.peers.size === 0) { rooms.delete(code); if (!IS_PACKAGED) console.log('[Signaling] Deleted empty room:', code); }
+    }
+
+    wss.on('connection', (ws) => {
+      ws.isAlive = true;
+      ws.roomCode = null;
+      ws.peerId = crypto.randomUUID();
+      ws.on('pong', () => { ws.isAlive = true; });
+      ws.on('message', (raw) => {
+        let msg;
+        try { msg = JSON.parse(raw); } catch { return; }
+        switch (msg.type) {
+          case 'create': {
+            const now = Date.now();
+            const lastCreate = peerCreateTimes.get(ws.peerId) || 0;
+            if (now - lastCreate < ROOM_CREATE_COOLDOWN) { sendTo(ws, { type: 'error', message: 'Too many rooms' }); return; }
+            let code; do { code = generateRoomCode(); } while (rooms.has(code));
+            rooms.set(code, { code, peers: new Map() });
+            ws.roomCode = code;
+            rooms.get(code).peers.set(ws.peerId, ws);
+            peerCreateTimes.set(ws.peerId, now);
+            sendTo(ws, { type: 'room-created', code, peerId: ws.peerId });
+            if (!IS_PACKAGED) console.log('[Signaling] Created:', code);
+            break;
+          }
+          case 'join': {
+            const code = (msg.code || '').toUpperCase();
+            const room = rooms.get(code);
+            if (!room) { sendTo(ws, { type: 'error', message: 'Room not found' }); return; }
+            if (room.peers.size >= 4) { sendTo(ws, { type: 'error', message: 'Room full' }); return; }
+            ws.roomCode = code;
+            room.peers.set(ws.peerId, ws);
+            const existing = []; for (const [pid] of room.peers) if (pid !== ws.peerId) existing.push(pid);
+            sendTo(ws, { type: 'room-joined', code, peerId: ws.peerId, peers: existing });
+            for (const [pid, pWs] of room.peers) if (pid !== ws.peerId) sendTo(pWs, { type: 'peer-joined', peerId: ws.peerId });
+            if (!IS_PACKAGED) console.log('[Signaling] Joined:', code, '(' + room.peers.size + ' peers)');
+            break;
+          }
+          case 'signal': {
+            const room = rooms.get(ws.roomCode);
+            if (!room) return;
+            const targetWs = room.peers.get(msg.targetPeerId);
+            if (targetWs) sendTo(targetWs, { type: 'signal', fromPeerId: ws.peerId, signal: msg.signal });
+            break;
+          }
+          case 'leave': {
+            const code = ws.roomCode; const room = rooms.get(code);
+            if (!room) return;
+            room.peers.delete(ws.peerId);
+            for (const [, pWs] of room.peers) sendTo(pWs, { type: 'peer-left', peerId: ws.peerId });
+            ws.roomCode = null;
+            cleanupRoom(code);
+            break;
+          }
+        }
+      });
+      ws.on('close', () => {
+        if (ws.roomCode) {
+          const room = rooms.get(ws.roomCode);
+          if (room) { room.peers.delete(ws.peerId); for (const [, pWs] of room.peers) sendTo(pWs, { type: 'peer-left', peerId: ws.peerId }); cleanupRoom(ws.roomCode); }
+        }
+      });
+    });
+
+    const hbInterval = setInterval(() => {
+      wss.clients.forEach((ws) => { if (!ws.isAlive) return ws.terminate(); ws.isAlive = false; ws.ping(); });
+    }, 30000);
+    wss.on('close', () => clearInterval(hbInterval));
+
+    _signalingWss = wss;
+    _signalingCleanup = () => { clearInterval(hbInterval); wss.close(); _signalingWss = null; };
+    console.log('[Signaling] Server running on ws://localhost:' + PORT);
+    return 'started';
+  } catch (e) {
+    console.error('[Signaling] Failed to start:', e.message);
+    return 'error';
+  }
 }
 
 function stopSignalingServer() {
-  if (signalingServerProcess) { signalingServerProcess.kill(); signalingServerProcess = null; }
+  if (_signalingCleanup) { _signalingCleanup(); _signalingCleanup = null; }
 }
 
 // --- FFmpeg utilities ---
@@ -461,7 +553,8 @@ ipcMain.handle('write-rec-chunk', (event, { chunk }) => {
   try {
     if (proc.killed || proc.exitCode !== null) return { success: false };
     if (!proc.stdin.writable || proc.stdin.destroyed) return { success: false };
-    proc.stdin.write(Buffer.from(chunk), () => {});
+    const view = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : chunk;
+    proc.stdin.write(Buffer.from(view.buffer, view.byteOffset, view.byteLength), () => {});
     return { success: true };
   } catch(e) {
     return { success: false, error: e.message };
@@ -472,7 +565,7 @@ ipcMain.handle('write-rec-chunk', (event, { chunk }) => {
 // Renderer pipes WebM chunks (canvas + mixed audio) → ffmpeg stdin → RTMP
 
 ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
-  // opts: { rtmpUrl, streamKey, bitrate, resolution, fps }
+  // opts: { rtmpUrl, streamKey, bitrate, resolution, fps, webcodecs }
   if (!opts || !opts.rtmpUrl) return { success: false, error: 'Missing RTMP URL' };
   // Get encrypted key from settings if streamKey not provided directly
   let key = opts.streamKey;
@@ -497,26 +590,40 @@ ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
   const w = res ? parseInt(res[1]) : 1280;
   const h = res ? parseInt(res[2]) : 720;
 
-  ffmpegStreamArgs = {
-    args: [
+  let args;
+  if (opts.webcodecs) {
+    // WebCodecs path: renderer sends MPEG-TS with H.264 + AAC already encoded.
+    // FFmpeg only demuxes TS and remuxes to FLV → RTMP. NO re-encoding.
+    args = [
       '-loglevel', 'level+info',
       '-hide_banner',
-      // ── Input: WebM (VP9/Opus) from MediaRecorder over stdin.
-      // Browser MediaRecorder gives PTS — trust them; do NOT rewrite with wallclock.
-      // +igndts: ignore decode timestamps from input (let muxer derive from PTS).
-      // +discardcorrupt: drop malformed packets instead of stalling.
+      '-fflags', '+igndts+discardcorrupt',
+      '-thread_queue_size', '2048',
+      '-f', 'mpegts',          // input format: MPEG-TS
+      '-i', '-',                // stdin
+      '-c:v', 'copy',           // video: copy H.264 as-is (NO re-encode!)
+      '-c:a', 'copy',           // audio: copy AAC as-is (NO re-encode!)
+      '-f', 'flv',
+      '-flvflags', 'no_duration_filesize',
+      fullUrl
+    ];
+    if (!IS_PACKAGED) console.log('[FFmpegStream] WebCodecs mode: copy codec (no re-encode)');
+  } else {
+    // Legacy path: renderer sends WebM (VP9/Opus), FFmpeg re-encodes to H.264/AAC
+    args = [
+      '-loglevel', 'level+info',
+      '-hide_banner',
       '-fflags', '+igndts+discardcorrupt',
       '-thread_queue_size', '1024',
       '-f', 'webm',
       '-i', '-',
-      // ── Video: scale + letterbox to target resolution, force CFR
       '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`,
       '-fps_mode', 'cfr',
       '-r', String(fps),
       '-c:v', 'libx264',
       '-preset', 'veryfast',
       '-tune', 'zerolatency',
-      '-profile:v', 'main',  // 'main' is more universally decoded than 'high' on AWS IVS web players
+      '-profile:v', 'main',
       '-level', '4.1',
       '-b:v', `${bitrate}k`,
       '-maxrate', `${bitrate}k`,
@@ -526,17 +633,20 @@ ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
       '-keyint_min', String(fps * 2),
       '-sc_threshold', '0',
       '-x264-params', `nal-hrd=cbr:keyint=${fps * 2}:min-keyint=${fps * 2}:scenecut=0`,
-      // ── Audio: AAC LC, stereo, 48 kHz, async resample (kills "Queue input is backward in time")
       '-af', 'aresample=async=1000:first_pts=0',
       '-c:a', 'aac',
       '-b:a', '160k',
       '-ar', '48000',
       '-ac', '2',
-      // ── Container
       '-f', 'flv',
       '-flvflags', 'no_duration_filesize',
       fullUrl
-    ],
+    ];
+    if (!IS_PACKAGED) console.log('[FFmpegStream] Legacy mode: WebM re-encode to H.264');
+  }
+
+  ffmpegStreamArgs = {
+    args,
     safeUrl,
     bitrate, fps, w, h,
   };
@@ -718,7 +828,9 @@ ipcMain.handle('write-stream-chunk', (event, { chunk }) => {
     if (proc.killed || proc.exitCode !== null) return { success: false };
     if (!proc.stdin.writable || proc.stdin.destroyed) return { success: false };
     lastChunkAt = Date.now();
-    proc.stdin.write(Buffer.from(chunk), (err) => { /* swallow EPIPE / EOF */ });
+    // Use Uint8Array view to avoid copying the entire ArrayBuffer
+    const view = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : chunk;
+    proc.stdin.write(Buffer.from(view.buffer, view.byteOffset, view.byteLength), (err) => { /* swallow EPIPE / EOF */ });
     return { success: true };
   } catch(e) {
     return { success: false, error: e.message };
@@ -802,6 +914,83 @@ ipcMain.handle('profile-dev-login', (_e, payload) => {
   };
   profileMgr.setToken('dev-' + Math.random().toString(36).slice(2, 18), fake);
   return { success: true, profile: profileMgr.getPublic() };
+});
+
+// ─── Direct login / register via server API (no browser needed) ───
+const API_BASE = 'https://streambro.ru/api';
+
+ipcMain.handle('profile-login', async (_e, { login, password }) => {
+  try {
+    const https = require('https');
+    const body = JSON.stringify({ login, password });
+    const url = new URL(`${API_BASE}/auth/login`);
+    const res = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: url.hostname,
+        port: 443,
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, (res) => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+    const parsed = JSON.parse(res.body);
+    if (res.status !== 200) return { success: false, error: parsed.error || `HTTP ${res.status}` };
+    const { token, user } = parsed;
+    if (!token) return { success: false, error: 'No token in response' };
+    profileMgr.setToken(token, {
+      id: user.id,
+      nickname: user.username || user.displayName,
+      email: user.email || '',
+      avatar: user.avatarUrl || '',
+    });
+    return { success: true, profile: profileMgr.getPublic() };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('profile-register', async (_e, { email, username, password }) => {
+  try {
+    const https = require('https');
+    const body = JSON.stringify({ email, username, password });
+    const url = new URL(`${API_BASE}/auth/register`);
+    const res = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: url.hostname,
+        port: 443,
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, (res) => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+    const parsed = JSON.parse(res.body);
+    if (res.status !== 201) return { success: false, error: parsed.error || `HTTP ${res.status}` };
+    const { token, user } = parsed;
+    if (!token) return { success: false, error: 'No token in response' };
+    profileMgr.setToken(token, {
+      id: user.id,
+      nickname: user.username,
+      email: user.email || '',
+      avatar: '',
+    });
+    return { success: true, profile: profileMgr.getPublic() };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 });
 
 // ─── Friends IPC (1.1.0) ───

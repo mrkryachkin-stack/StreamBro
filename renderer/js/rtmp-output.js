@@ -1,7 +1,8 @@
-// RTMP / Recording Output Module v9
+// RTMP / Recording Output Module v10
+// - Streaming: WebCodecs (H.264 + AAC → MPEG-TS) → IPC → FFmpeg (copy, NO re-encode) → RTMP
+//   Falls back to MediaRecorder (WebM) → IPC → FFmpeg (re-encode) if WebCodecs unavailable.
 // - Recording: MediaRecorder → IPC → FFmpeg stdin → MP4 directly (no post-conversion).
-//   If FFmpeg is unavailable for some reason we fall back to writing a WebM file.
-// - Streaming: MediaRecorder (WebM chunks) → IPC → FFmpeg stdin → RTMP (real, live)
+//   If FFmpeg is unavailable we fall back to writing a WebM file.
 // All UI status transitions are exposed via callbacks.
 
 class RTMPOutput {
@@ -21,8 +22,9 @@ class RTMPOutput {
     this._recPauseStart = null;
     this._recWebmPath = null;
     this._recMp4Path = null;
-    this._recLiveMode = false;       // true → live-pipe to ffmpeg → MP4
-    this._recFallbackChunks = null;  // used only if live ffmpeg pipe fails to start
+    this._recLiveMode = false;
+    this._recFallbackChunks = null;
+    this._recFallbackBytes = 0;
     this._recOnStoppedHandler = null;
     this.onRecStart = null;
     this.onRecStop = null;
@@ -34,38 +36,44 @@ class RTMPOutput {
     // Streaming state
     this.isStreaming = false;
     this.isPaused = false;
-    this._streamRecorder = null;
+    this._streamRecorder = null;   // MediaRecorder fallback
+    this._videoEncoder = null;      // WebCodecs VideoEncoder
+    this._audioEncoder = null;      // WebCodecs AudioEncoder
+    this._audioSourceNode = null;   // MediaStreamSource for audio encoding
+    this._audioProcessor = null;    // ScriptProcessor to feed raw audio to encoder
+    this._frameTimer = null;        // setInterval for capturing VideoFrames
+    this._useWebCodecs = false;     // true if using WebCodecs path
     this._streamStartTime = null;
     this._streamServer = '';
     this._streamKey = '';
     this._streamResolution = '1280x720';
     this._streamFps = 30;
-    this._streamStatus = 'offline'; // offline | connecting | live | reconnecting | error
+    this._streamStatus = 'offline';
+    this._pendingTsPackets = [];    // buffer of MPEG-TS packets before first IPC
+    this._audioSeq = 0;
+    this._videoSeq = 0;
+    this._ptsCounter = 0;           // PTS counter (90kHz clock)
+    this._audioSamplesIn = 0;       // total audio samples fed
     this.onStart = null;
     this.onStop = null;
     this.onPause = null;
     this.onResume = null;
     this.onError = null;
-    this.onStatus = null;       // (state, reason) => void
+    this.onStatus = null;
 
-    // Subscribe to backend status updates once
+    // Check WebCodecs availability
+    this._webCodecsSupported = typeof VideoEncoder !== 'undefined' && typeof AudioEncoder !== 'undefined';
+
+    // Subscribe to backend status updates
     if (window.electronAPI && window.electronAPI.onStreamStatus) {
       window.electronAPI.onStreamStatus((data) => {
         this._streamStatus = data.state;
         if (this.onStatus) this.onStatus(data.state, data.reason);
-        // Stop the renderer-side MediaRecorder when the stream is permanently offline
-        // or has errored — otherwise it keeps producing WebM chunks that go nowhere
-        // and bloats memory in the renderer process.
         if ((data.state === 'offline' || data.state === 'error') && this.isStreaming) {
           this.isStreaming = false;
           this.isPaused = false;
           this._streamStartTime = null;
-          try {
-            if (this._streamRecorder && this._streamRecorder.state !== 'inactive') {
-              this._streamRecorder.stop();
-            }
-          } catch (e) {}
-          this._streamRecorder = null;
+          this._cleanupStreamEncoders();
           if (this.onStop) this.onStop();
         }
       });
@@ -102,11 +110,281 @@ class RTMPOutput {
 
   _buildStream() {
     const audioTracks = this.combinedStream ? this.combinedStream.getAudioTracks() : [];
-    let videoTracks = [];
-    if (this.canvas && this.canvas.captureStream) {
-      videoTracks = this.canvas.captureStream(this.fps).getVideoTracks();
+    const videoTracks = this.combinedStream ? this.combinedStream.getVideoTracks() : [];
+    if (!videoTracks.length && this.canvas && this.canvas.captureStream) {
+      return new MediaStream([...this.canvas.captureStream(this.fps).getVideoTracks(), ...audioTracks]);
     }
     return new MediaStream([...videoTracks, ...audioTracks]);
+  }
+
+  // ─── WebCodecs MPEG-TS helpers ───
+
+  _mpegTsPacketHeader(pid, pts, isKeyframe, isAudio) {
+    // Simplified MPEG-TS packet (188 bytes) header
+    // Sync byte + PID + Adaptation + Continuity counter
+    const pkt = new Uint8Array(188);
+    let offset = 0;
+
+    // Sync byte
+    pkt[0] = 0x47;
+    // Transport error=0, payload unit start=1, PID
+    const pidVal = pid & 0x1FFF;
+    pkt[1] = 0x40 | (pidVal >> 8);
+    pkt[2] = pidVal & 0xFF;
+    // Scrambling=0, adaptation=01 (payload only), continuity
+    const cont = isAudio ? (this._audioSeq++) & 0xF : (this._videoSeq++) & 0xF;
+    pkt[3] = 0x10 | cont;
+
+    offset = 4;
+
+    // If we have PTS, write adaptation field + PTS
+    if (pts !== null) {
+      pkt[3] = 0x30 | cont; // adaptation=11 (adaptation + payload)
+      const adaptLen = 188 - 4 - 8 - 1; // header(4) + af(2+5+1) + payload
+      // Actually: adaptation field length, then PTS
+      // Simplified: just add padding for adaptation
+      const adFieldLen = 7; // 1 flags + 3 pts base + 1 pts ext + 2
+      pkt[4] = adFieldLen;
+      pkt[5] = 0x80; // PTS flag set
+      // Write 5-byte PTS (33-bit PTS)
+      const pts33 = pts & 0x1FFFFFFFF;
+      pkt[6] = (0x20 | ((pts33 >> 29) & 0x0E) | 1); // '0010' + 3 PTS bits + marker
+      pkt[7] = ((pts33 >> 22) & 0xFF);
+      pkt[8] = (((pts33 >> 14) & 0xFE) | 1);
+      pkt[9] = ((pts33 >> 7) & 0xFF);
+      pkt[10] = (((pts33 << 1) & 0xFE) | 1);
+      offset = 11;
+    }
+
+    return { pkt, offset };
+  }
+
+  _makeMpegTsPackets(encodedChunk, isAudio) {
+    // Convert an EncodedVideoChunk or EncodedAudioChunk into one or more MPEG-TS packets
+    // This is a simplified PES → TS packetizer
+    const data = new Uint8Array(encodedChunk.byteLength);
+    encodedChunk.copyTo(data);
+
+    const pid = isAudio ? 0x100 : 0x200;
+    const pts90k = Math.round(encodedChunk.timestamp * 90 / 1000); // ms → 90kHz
+    const isKey = !isAudio && (encodedChunk.type === 'key');
+
+    // PES header
+    const streamId = isAudio ? 0xC0 : 0xE0;
+    const pesHeaderLen = isKey ? 19 : 14; // with DTS for keyframes
+    const pesLen = 3 + 1 + 2 + 1 + pesHeaderLen + data.length;
+    const pes = new Uint8Array(3 + 1 + 2 + 1 + pesHeaderLen + data.length);
+    let o = 0;
+    // PES start code
+    pes[o++] = 0x00; pes[o++] = 0x00; pes[o++] = 0x01;
+    pes[o++] = streamId;
+    // PES packet length
+    const pLen = pes.length - 6;
+    pes[o++] = (pLen >> 8) & 0xFF;
+    pes[o++] = pLen & 0xFF;
+    // Flags
+    pes[o++] = 0x80; // PTS present
+    if (isKey) pes[o - 1] = 0xC0; // PTS + DTS
+    pes[o++] = pesHeaderLen; // header data length placeholder area
+    // PTS (5 bytes)
+    const pts33 = pts90k & 0x1FFFFFFFF;
+    pes[o++] = (0x21 | ((pts33 >> 29) & 0x0E));
+    pes[o++] = ((pts33 >> 22) & 0xFF);
+    pes[o++] = (((pts33 >> 14) & 0xFE) | 1);
+    pes[o++] = ((pts33 >> 7) & 0xFF);
+    pes[o++] = (((pts33 << 1) & 0xFE) | 1);
+    // DTS for keyframes
+    if (isKey) {
+      const dts33 = pts33; // simplified: DTS = PTS for low-latency
+      pes[o++] = (0x11 | ((dts33 >> 29) & 0x0E));
+      pes[o++] = ((dts33 >> 22) & 0xFF);
+      pes[o++] = (((dts33 >> 14) & 0xFE) | 1);
+      pes[o++] = ((dts33 >> 7) & 0xFF);
+      pes[o++] = (((dts33 << 1) & 0xFE) | 1);
+    }
+    // Payload
+    pes.set(data, o);
+
+    // Split into 188-byte TS packets
+    const packets = [];
+    let pos = 0;
+    let firstPacket = true;
+    while (pos < pes.length) {
+      const remaining = pes.length - pos;
+      const chunkSize = Math.min(remaining, 184);
+      const pkt = new Uint8Array(188);
+
+      // Sync byte
+      pkt[0] = 0x47;
+      // PID + PUSI (payload unit start indicator on first packet)
+      const pidVal = pid & 0x1FFF;
+      pkt[1] = (firstPacket ? 0x40 : 0x00) | (pidVal >> 8);
+      pkt[2] = pidVal & 0xFF;
+      // Continuity counter
+      const cont = isAudio ? (this._audioSeq++) & 0xF : (this._videoSeq++) & 0xF;
+
+      if (chunkSize < 184) {
+        // Need adaptation field padding
+        pkt[3] = 0x30 | cont; // adaptation + payload
+        const padLen = 183 - chunkSize;
+        pkt[4] = padLen;
+        for (let i = 5; i < 5 + padLen; i++) pkt[i] = 0xFF;
+        pkt.set(pes.subarray(pos, pos + chunkSize), 5 + padLen);
+      } else {
+        pkt[3] = 0x10 | cont; // payload only
+        pkt.set(pes.subarray(pos, pos + 184), 4);
+      }
+
+      packets.push(pkt);
+      pos += chunkSize;
+      firstPacket = false;
+    }
+
+    return packets;
+  }
+
+  // ─── WebCodecs streaming path ───
+
+  async _startWebCodecsStream(stream) {
+    const self = this;
+    const fps = this._streamFps || 30;
+    const bitrate = this.bitrate * 1000;
+
+    // Video encoder (H.264)
+    this._videoEncoder = new VideoEncoder({
+      output: (chunk, meta) => {
+        const tsPackets = self._makeMpegTsPackets(chunk, false);
+        const combined = new Uint8Array(tsPackets.length * 188);
+        for (let i = 0; i < tsPackets.length; i++) {
+          combined.set(tsPackets[i], i * 188);
+        }
+        window.electronAPI.writeStreamChunk(combined.buffer).catch(() => {});
+      },
+      error: (e) => {
+        if (window.__sbDev) console.error('[WebCodecs] VideoEncoder error:', e);
+        if (self.onError) self.onError('Ошибка видео-энкодера: ' + e.message);
+      }
+    });
+
+    this._videoEncoder.configure({
+      codec: 'avc1.640028', // H.264 High profile
+      width: parseInt(this._streamResolution.split('x')[0]) || 1280,
+      height: parseInt(this._streamResolution.split('x')[1]) || 720,
+      bitrate: bitrate,
+      framerate: fps,
+      latencyMode: 'realtime',
+      hardwareAcceleration: 'prefer-hardware',
+    });
+
+    // Audio encoder (AAC)
+    this._audioEncoder = new AudioEncoder({
+      output: (chunk, meta) => {
+        const tsPackets = self._makeMpegTsPackets(chunk, true);
+        const combined = new Uint8Array(tsPackets.length * 188);
+        for (let i = 0; i < tsPackets.length; i++) {
+          combined.set(tsPackets[i], i * 188);
+        }
+        window.electronAPI.writeStreamChunk(combined.buffer).catch(() => {});
+      },
+      error: (e) => {
+        if (window.__sbDev) console.error('[WebCodecs] AudioEncoder error:', e);
+      }
+    });
+
+    this._audioEncoder.configure({
+      codec: 'mp4a.40.2', // AAC-LC
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      bitrate: 160000,
+    });
+
+    // Feed audio from MediaStream via AudioContext + ScriptProcessor
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length > 0) {
+      const audioCtx = new AudioContext({ sampleRate: 48000 });
+      const source = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
+      this._audioSourceNode = source;
+      // Use ScriptProcessor to get raw PCM and feed to AudioEncoder
+      // (AudioWorklet would be better but more complex)
+      const processor = audioCtx.createScriptProcessor(4096, 2, 2);
+      this._audioProcessor = processor;
+      processor.onaudioprocess = (e) => {
+        if (!self.isStreaming || !self._audioEncoder || self._audioEncoder.state === 'closed') return;
+        const left = e.inputBuffer.getChannelData(0);
+        const right = e.inputBuffer.getChannelData(1);
+        // Interleave stereo
+        const interleaved = new Float32Array(left.length * 2);
+        for (let i = 0; i < left.length; i++) {
+          interleaved[i * 2] = left[i];
+          interleaved[i * 2 + 1] = right[i];
+        }
+        const audioData = new AudioData({
+          format: 'f32-planar',
+          sampleRate: 48000,
+          numberOfFrames: left.length,
+          numberOfChannels: 2,
+          timestamp: self._audioSamplesIn * 1000000 / 48, // microseconds
+          data: interleaved,
+        });
+        self._audioSamplesIn += left.length;
+        if (self._audioEncoder.state === 'configured') {
+          self._audioEncoder.encode(audioData);
+        }
+        audioData.close();
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination); // must connect to destination to process
+    }
+
+    // Capture VideoFrames from canvas at target FPS
+    this._frameTimer = setInterval(() => {
+      if (!self.isStreaming || !self.canvas || !self._videoEncoder || self._videoEncoder.state === 'closed') return;
+      try {
+        const frame = new VideoFrame(self.canvas, {
+          timestamp: self._ptsCounter,
+        });
+        self._ptsCounter += 1000000 / fps; // microseconds per frame
+        const isKeyframe = (self._videoEncoder.encodeQueueSize === 0) ||
+          (Math.round(self._ptsCounter / 1000000) % 2 === 0); // keyframe every 2 seconds
+        const opts = isKeyframe ? { keyFrame: true } : undefined;
+        if (self._videoEncoder.state === 'configured') {
+          self._videoEncoder.encode(frame, opts);
+        }
+        frame.close();
+      } catch (e) {
+        if (window.__sbDev) console.warn('[WebCodecs] frame capture error:', e);
+      }
+    }, 1000 / fps);
+
+    this._useWebCodecs = true;
+  }
+
+  _cleanupStreamEncoders() {
+    if (this._frameTimer) { clearInterval(this._frameTimer); this._frameTimer = null; }
+    if (this._videoEncoder) {
+      try {
+        if (this._videoEncoder.state === 'configured') this._videoEncoder.flush();
+        this._videoEncoder.close();
+      } catch(e) {}
+      this._videoEncoder = null;
+    }
+    if (this._audioEncoder) {
+      try {
+        if (this._audioEncoder.state === 'configured') this._audioEncoder.flush();
+        this._audioEncoder.close();
+      } catch(e) {}
+      this._audioEncoder = null;
+    }
+    if (this._audioProcessor) { try { this._audioProcessor.disconnect(); } catch(e) {} this._audioProcessor = null; }
+    if (this._audioSourceNode) { try { this._audioSourceNode.disconnect(); } catch(e) {} this._audioSourceNode = null; }
+    if (this._streamRecorder) {
+      try { if (this._streamRecorder.state !== 'inactive') this._streamRecorder.stop(); } catch(e) {}
+      this._streamRecorder = null;
+    }
+    this._ptsCounter = 0;
+    this._audioSamplesIn = 0;
+    this._audioSeq = 0;
+    this._videoSeq = 0;
   }
 
   // ─── Live RTMP streaming ───
@@ -118,11 +396,7 @@ class RTMPOutput {
         if (this.onError) this.onError('Нет потока — добавьте источники');
         return;
       }
-      const mime = this._pickMime();
-      if (!mime) {
-        if (this.onError) this.onError('Формат не поддерживается');
-        return;
-      }
+
       // Tell main process to start ffmpeg with rtmp output
       const result = await window.electronAPI.startStream({
         rtmpUrl: this._streamServer,
@@ -130,34 +404,46 @@ class RTMPOutput {
         bitrate: this.bitrate,
         resolution: this._streamResolution,
         fps: this._streamFps,
+        webcodecs: this._webCodecsSupported, // tell main we might send MPEG-TS
       });
       if (!result || !result.success) {
         if (this.onError) this.onError(result && result.error ? result.error : 'Ошибка запуска FFmpeg');
         return;
       }
 
-      // Spin up MediaRecorder that pipes WebM chunks into ffmpeg
-      this._streamRecorder = new MediaRecorder(stream, {
-        mimeType: mime,
-        videoBitsPerSecond: this.bitrate * 1000,
-        audioBitsPerSecond: 160000,
-      });
-      this._streamRecorder.ondataavailable = async (e) => {
-        if (!this.isStreaming) return;
-        if (e.data && e.data.size > 0) {
-          try {
-            const buf = await e.data.arrayBuffer();
-            await window.electronAPI.writeStreamChunk(buf);
-          } catch (err) {
-            // Pipe broken — main will reconnect ffmpeg automatically
-          }
+      if (this._webCodecsSupported) {
+        // WebCodecs path: H.264 + AAC → MPEG-TS → FFmpeg (copy, no re-encode)
+        if (window.__sbDev) console.log('[Stream] Using WebCodecs path (no re-encode)');
+        await this._startWebCodecsStream(stream);
+      } else {
+        // Fallback: MediaRecorder (WebM) → FFmpeg (re-encode to H.264)
+        if (window.__sbDev) console.log('[Stream] Using MediaRecorder fallback (re-encode)');
+        const mime = this._pickMime();
+        if (!mime) {
+          if (this.onError) this.onError('Формат не поддерживается');
+          return;
         }
-      };
-      this._streamRecorder.onerror = (e) => {
-        if (this.onError) this.onError((e.error && e.error.message) || 'Recorder error');
-      };
-      // Send small chunks for low latency (250ms)
-      this._streamRecorder.start(250);
+        const self = this;
+        const recorder = new MediaRecorder(stream, {
+          mimeType: mime,
+          videoBitsPerSecond: this.bitrate * 1000,
+          audioBitsPerSecond: 160000,
+        });
+        this._streamRecorder = recorder;
+        recorder.ondataavailable = async (e) => {
+          if (!self.isStreaming) return;
+          if (e.data && e.data.size > 0) {
+            try {
+              const buf = await e.data.arrayBuffer();
+              await window.electronAPI.writeStreamChunk(buf);
+            } catch (err) {}
+          }
+        };
+        recorder.onerror = (e) => {
+          if (this.onError) this.onError((e.error && e.error.message) || 'Recorder error');
+        };
+        recorder.start(250);
+      }
 
       this.isStreaming = true;
       this.isPaused = false;
@@ -175,6 +461,11 @@ class RTMPOutput {
       this.isPaused = true;
       if (this.onPause) this.onPause();
     }
+    // WebCodecs: just stop sending frames (interval keeps running but no encode)
+    if (this._useWebCodecs) {
+      this.isPaused = true;
+      if (this.onPause) this.onPause();
+    }
   }
 
   resume() {
@@ -184,20 +475,22 @@ class RTMPOutput {
       this.isPaused = false;
       if (this.onResume) this.onResume();
     }
+    if (this._useWebCodecs) {
+      this.isPaused = false;
+      if (this.onResume) this.onResume();
+    }
   }
 
   async stop() {
     if (!this.isStreaming) return;
     try {
-      if (this._streamRecorder && this._streamRecorder.state !== 'inactive') {
-        try { this._streamRecorder.stop(); } catch(e) {}
-      }
-      this._streamRecorder = null;
+      this._cleanupStreamEncoders();
       await window.electronAPI.stopStream();
     } catch (e) {}
     this.isStreaming = false;
     this.isPaused = false;
     this._streamStartTime = null;
+    this._useWebCodecs = false;
     if (this.onStop) this.onStop();
   }
 
@@ -218,8 +511,6 @@ class RTMPOutput {
       this._recMp4Path  = videosDir + '\\StreamBro_' + ts + '.mp4';
       this._recWebmPath = videosDir + '\\StreamBro_' + ts + '.webm';
 
-      // Try to start a live FFmpeg pipe that writes MP4 directly. If FFmpeg is missing
-      // we transparently fall back to "save WebM blob" path.
       this._recLiveMode = false;
       this._recFallbackChunks = null;
       try {
@@ -229,14 +520,9 @@ class RTMPOutput {
       } catch (e) {
         if (window.__sbDev) console.warn('[Rec] FFmpeg pipe error, falling back to WebM:', e);
       }
-      if (!this._recLiveMode) this._recFallbackChunks = [];
+      if (!this._recLiveMode) { this._recFallbackChunks = []; this._recFallbackBytes = 0; }
 
-      // Wire the once-only "ffmpeg-rec-stopped" handler that finalises the file path
-      // (we use renderer-side onSaveDone — the IPC event also confirms the close).
-      this._recOnStoppedHandler = (data) => {
-        // data: { code, path } — already wired in app.js; we don't need to do anything
-        // extra here, but keep the hook for future progress UI.
-      };
+      this._recOnStoppedHandler = (data) => {};
 
       this._recorder = new MediaRecorder(stream, {
         mimeType: mime,
@@ -251,25 +537,27 @@ class RTMPOutput {
           try {
             const buf = await e.data.arrayBuffer();
             await window.electronAPI.writeRecChunk(buf);
-          } catch (err) {
-            // Pipe broken — silently drop; ffmpeg will close and trigger onstop flow.
-          }
+          } catch (err) {}
         } else if (this._recFallbackChunks) {
+          this._recFallbackBytes = (this._recFallbackBytes || 0) + e.data.size;
+          if (this._recFallbackBytes > 500 * 1024 * 1024) {
+            if (this.onRecStop) this.onRecStop(null);
+            if (this.onError) this.onError('Запись слишком длинная для WebM — используйте MP4');
+            this.stopRecording();
+            return;
+          }
           this._recFallbackChunks.push(e.data);
         }
       };
 
+      const recInstance = this._recorder;
       this._recorder.onstop = async () => {
-        this._recorder = null;
+        if (this._recorder === recInstance) this._recorder = null;
         if (this._recLiveMode) {
-          // Tell FFmpeg to finalise; the file appears once the process closes.
           try { await window.electronAPI.stopFFmpegRecording(); } catch(e) {}
           if (this._showConverting) try { this._showConverting('Финализация MP4…'); } catch(e) {}
-          // Wait briefly for ffmpeg to finalise; main emits 'ffmpeg-rec-stopped' that
-          // app.js listens to. We just announce the intended path here.
           if (this.onSaveDone) this.onSaveDone(this._recMp4Path);
         } else {
-          // WebM blob fallback (no FFmpeg available)
           const chunks = this._recFallbackChunks || [];
           this._recFallbackChunks = null;
           if (chunks.length === 0) {
@@ -281,16 +569,17 @@ class RTMPOutput {
       };
 
       this._recorder.onerror = (e) => {
-        this._recording = false;
-        this._recPaused = false;
-        this._recorder = null;
+        if (this._recorder === recInstance) {
+          this._recording = false;
+          this._recPaused = false;
+          this._recorder = null;
+        }
         if (this._recLiveMode) {
           try { window.electronAPI.stopFFmpegRecording(); } catch(_) {}
         }
         if (this.onError) this.onError((e.error && e.error.message) || 'Recording error');
       };
 
-      // Smaller chunk interval gives ffmpeg-pipe nicer cadence; 1000 ms is a fine balance.
       this._recorder.start(this._recLiveMode ? 1000 : 2000);
       this._recording = true; this._recPaused = false;
       this._recStartTime = Date.now(); this._recPauseAccum = 0; this._recPauseStart = null;
@@ -307,7 +596,6 @@ class RTMPOutput {
     const buf = await blob.arrayBuffer();
     try {
       await window.electronAPI.saveRecFile({ path: this._recWebmPath, data: buf });
-      // Best-effort post-conversion to MP4 if ffmpeg is reachable
       try {
         const r = await window.electronAPI.convertToMp4({ inputPath: this._recWebmPath, outputPath: this._recMp4Path });
         if (r && r.success) {
@@ -334,7 +622,7 @@ class RTMPOutput {
   }
 
   resumeRecording() {
-    if (!this._recording || !this._recPaused) return;
+    if (!this._recording || this._recPaused) return;
     if (this._recorder && this._recorder.state === 'paused') {
       this._recorder.resume();
       if (this._recPauseStart) { this._recPauseAccum += Date.now() - this._recPauseStart; this._recPauseStart = null; }

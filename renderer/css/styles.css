@@ -208,13 +208,7 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
     radial-gradient(ellipse 35% 30% at 78% 72%, var(--blob-2), transparent 55%),
     radial-gradient(ellipse 30% 28% at 50% 90%, var(--blob-3), transparent 55%);
   opacity:.7;
-  animation:sceneDrift 22s ease-in-out infinite alternate;
   filter:blur(50px);
-}
-@keyframes sceneDrift{
-  0%   { transform:translate(-2%,-1%) scale(1);   }
-  50%  { transform:translate(2%,2%)   scale(1.08);}
-  100% { transform:translate(-1%,1%)  scale(1);   }
 }
 .scene-area>*{position:relative;z-index:1}
 .scene-preview{
@@ -237,7 +231,8 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
   content:'';position:absolute;inset:0;pointer-events:none;z-index:0;
   background:radial-gradient(ellipse at 50% 0%, rgba(255,255,255,.03) 0%, transparent 55%);
 }
-#sceneCanvas{max-width:100%;max-height:100%;object-fit:contain;transition:transform .12s ease;position:relative;z-index:2;background:transparent}
+#sceneCanvas{max-width:100%;max-height:100%;object-fit:contain;position:relative;z-index:2;background:transparent}
+#sceneOverlay{position:absolute;z-index:3;pointer-events:none}
 /* Превью камеры/рамки — мягкий двух-цветный фон, чтобы edge-dissolve был ВИДЕН.
    Используется внутри .transparent-preview обёрток. */
 .transparent-preview{
@@ -285,7 +280,6 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
   content:'';position:absolute;inset:-15%;pointer-events:none;z-index:0;
   background:var(--sidebar-grad);
   background-size:160% 240%;
-  animation:sidebarFlow 22s ease-in-out infinite;
   opacity:1;
 }
 .sidebar::after{
@@ -296,24 +290,13 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
     radial-gradient(circle 240px at 25% 90%, var(--blob-3), transparent 70%);
   filter:blur(12px);
   opacity:.85;
-  animation:auroraDrift 18s ease-in-out infinite alternate;
 }
-@keyframes sidebarFlow{
-  0%   {background-position:0% 0%}
-  50%  {background-position:100% 100%}
-  100% {background-position:0% 0%}
-}
-@keyframes auroraDrift{
-  0%   {transform:translate(-2%, 0%)}
-  100% {transform:translate(2%, -1%)}
-}
-/* Bottom-panel — same vibe, slower, mirrored */
+/* Bottom-panel — same vibe, no animation */
 .bottom-panel{position:relative;}
 .bottom-panel::before{
   content:'';position:absolute;inset:0;pointer-events:none;z-index:0;
   background:var(--sidebar-grad);
   background-size:240% 200%;
-  animation:sidebarFlow 26s ease-in-out infinite reverse;
   opacity:.85;
 }
 .bottom-panel::after{
@@ -323,22 +306,15 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
     radial-gradient(circle 240px at 15% 70%, var(--blob-3), transparent 70%);
   filter:blur(14px);
   opacity:.7;
-  animation:auroraDrift 22s ease-in-out infinite alternate-reverse;
 }
 .bottom-panel>*{position:relative;z-index:1}
 .sidebar>*{position:relative;z-index:1}
 
-/* Top-bar accent strip — subtle moving glow line at the bottom */
+/* Top-bar accent strip — static glow line */
 .top-bar::before{
   content:'';position:absolute;left:0;right:0;bottom:0;height:1.5px;pointer-events:none;z-index:2;
   background:linear-gradient(90deg, transparent 0%, var(--accent) 25%, var(--accent2) 50%, var(--accent) 75%, transparent 100%);
-  background-size:200% 100%;
-  animation:topStrip 9s linear infinite;
   opacity:.7;
-}
-@keyframes topStrip{
-  0%   {background-position:0% 0%}
-  100% {background-position:200% 0%}
 }
 
 /* Accordion */
@@ -416,8 +392,8 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .source-item.dragging{opacity:.5;transform:scale(.96)}
 .source-item.hidden-src{opacity:.45}
 .source-item.locked-src{cursor:default}
-.source-icon{width:42px;height:26px;border-radius:5px;background:#000;overflow:hidden;flex-shrink:0;border:1px solid var(--glass-border)}
-.source-icon video{width:100%;height:100%;object-fit:cover}
+.source-icon{width:32px;height:32px;border-radius:6px;background:var(--bg2);overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--muted)}
+.source-icon svg{width:18px;height:18px}
 .source-info{flex:1;min-width:0}
 .source-name{font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .source-type{font-size:10px;color:var(--muted)}
@@ -483,6 +459,9 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .fx-switch input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
 .fx-switch-label{font-size:9px;font-weight:700;padding:2px 8px;border-radius:10px;background:rgba(127,127,127,.10);color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
 .fx-switch-label.on{background:var(--accent-g);color:var(--accent)}
+.fx-toggle{font-size:10px;font-weight:700;padding:3px 12px;border-radius:10px;border:1.5px solid var(--muted);background:transparent;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;cursor:pointer;transition:all .15s ease;outline:none}
+.fx-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.fx-toggle.on{background:var(--accent-g);border-color:var(--accent);color:var(--accent)}
 .fx-params{display:flex;flex-direction:column;gap:5px}
 .fx-row{display:flex;align-items:center;gap:6px}
 .fx-label{font-size:10px;color:var(--text2);width:60px;flex-shrink:0;text-transform:uppercase;letter-spacing:.5px}
@@ -564,6 +543,12 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .form-group input:focus,.form-group select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-g)}
 .form-group select option{background:var(--bg1);color:var(--text)}
 .input-row{display:flex;gap:3px}.input-row input{flex:1}
+
+/* ─── Hint tooltips (?) ─── */
+.hint-toggle{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:var(--bg2);color:var(--muted);font-size:9px;font-weight:700;cursor:help;margin-left:4px;user-select:none}
+#hintBubble{position:fixed;z-index:999999;background:rgba(20,20,30,.9);color:#e0e0e0;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;line-height:1.4;padding:8px 10px;border-radius:6px;border:1px solid var(--glass-border);box-shadow:0 4px 16px rgba(0,0,0,.4);white-space:normal;width:220px;pointer-events:none;opacity:0;transition:opacity .12s}
+#hintBubble.show{opacity:1}
+[data-theme='light'] #hintBubble,[data-theme='paper'] #hintBubble{background:rgba(255,255,255,.92);color:#333;border-color:rgba(0,0,0,.12)}
 
 /* ─── Modals ─── */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center;z-index:1000;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);animation:fadeIn .14s ease}
@@ -754,6 +739,13 @@ select option{
 .profile-check{display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text);cursor:pointer;margin-bottom:6px}
 .profile-check input[type="checkbox"]{accent-color:var(--accent)}
 .profile-actions{display:flex;flex-wrap:wrap;gap:8px;padding-top:8px;border-top:1px solid var(--glass-border)}
+.profile-inline-form{padding:4px 0}
+.profile-inline-form .form-group{margin-bottom:12px}
+.profile-inline-form .form-group label{display:block;font-size:12px;font-weight:600;margin-bottom:4px;color:var(--text)}
+.profile-inline-form .form-group input{width:100%;padding:8px 10px;border-radius:var(--r-sm);border:1px solid var(--glass-border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box}
+.profile-inline-form .form-group input:focus{outline:none;border-color:var(--accent)}
+.profile-inline-form h3{font-size:16px;font-weight:700}
+.profile-inline-form .profile-actions{flex-direction:column;border-top:none;padding-top:0}
 .profile-bug-status{padding:8px 10px;background:rgba(127,127,127,.08);border-radius:var(--r-sm);font-size:11px;color:var(--text2);display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .btn-link{background:transparent;border:none;color:var(--accent);cursor:pointer;text-decoration:underline;font-size:11px;padding:0}
 .btn-link:hover{color:var(--accent2)}

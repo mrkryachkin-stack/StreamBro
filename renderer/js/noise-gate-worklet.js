@@ -18,6 +18,8 @@ class NoisGateProcessor extends AudioWorkletProcessor {
     this._targetGain  = 1.0;
     this._gateOpen    = true;
     this._holdSamples = 0;
+    // Pre-allocated gain envelope buffer — avoids ~370 allocations/sec inside process()
+    this._gainEnv = new Float32Array(128);
 
     // Receive settings updates from main thread
     this.port.onmessage = ({ data }) => {
@@ -83,7 +85,9 @@ class NoisGateProcessor extends AudioWorkletProcessor {
     const coeff      = this._gateOpen ? openCoeff : closeCoeff;
 
     // Calculate gain envelope once, apply to all channels
-    const gainEnv = new Float32Array(frameLen);
+    // Resize pre-allocated buffer if needed (normally 128 = standard frame size)
+    if (this._gainEnv.length < frameLen) this._gainEnv = new Float32Array(frameLen);
+    const gainEnv = this._gainEnv;
     let g = this._currentGain;
     const tgt = this._targetGain;
     for (let i = 0; i < frameLen; i++) {

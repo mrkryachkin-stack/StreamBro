@@ -359,10 +359,10 @@ class WebRTCManager {
 
     // Quality preset (movie-grade)
     this.qualityOpts = {
-      maxVideoBitrate: 8_000_000,
-      maxAudioBitrate: 192_000,
-      preferStereoOpus: true,
-      preferVP9: true,
+      maxVideoBitrate: 2_500_000,
+      maxAudioBitrate: 64_000,
+      preferStereoOpus: false,
+      preferVP9: false,
     };
   }
 

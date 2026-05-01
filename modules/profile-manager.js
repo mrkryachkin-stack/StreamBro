@@ -15,9 +15,9 @@
 const { safeStorage, shell } = require('electron');
 const settingsMod = require('../settings');
 
-const SIGNUP_URL  = 'https://streambro.ru/signup';
+const SIGNUP_URL  = 'https://streambro.ru/register';
 const LOGIN_URL   = 'https://streambro.ru/login';
-const PROFILE_URL = 'https://streambro.ru/profile';
+const PROFILE_URL = 'https://streambro.ru/dashboard';
 
 let _settings = null;
 let _onChange = () => {};
@@ -128,11 +128,12 @@ function handleDeepLink(url) {
     if (!token) return false;
     const serverProfile = {
       id: u.searchParams.get('id') || '',
-      nickname: u.searchParams.get('nickname') || '',
+      nickname: u.searchParams.get('nickname') || u.searchParams.get('username') || '',
       email: u.searchParams.get('email') || '',
       avatar: u.searchParams.get('avatar') || '',
     };
-    setToken(token, serverProfile);
+    const result = setToken(token, serverProfile);
+    if (result.success) _onChange(_settings);
     return true;
   } catch (e) {
     console.error('[Profile] Bad deep link:', e.message);
@@ -140,8 +141,8 @@ function handleDeepLink(url) {
   }
 }
 
-function openSignup()  { shell.openExternal(SIGNUP_URL  + '?device=' + encodeURIComponent(_settings?.profile?.id || '')); }
-function openLogin()   { shell.openExternal(LOGIN_URL   + '?device=' + encodeURIComponent(_settings?.profile?.id || '')); }
+function openSignup()  { shell.openExternal(SIGNUP_URL  + '?redirect=app&device=' + encodeURIComponent(_settings?.profile?.id || '')); }
+function openLogin()   { shell.openExternal(LOGIN_URL   + '?redirect=app&device=' + encodeURIComponent(_settings?.profile?.id || '')); }
 function openProfile() { shell.openExternal(PROFILE_URL); }
 
 module.exports = {

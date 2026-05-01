@@ -17,6 +17,7 @@ const DEFAULT_SETTINGS = {
     accentColor: '#ffd23c',
     targetFps: 60,           // canvas render fps
     reducedMotion: false,    // disables frame animations when GPU is slow
+    gpuRendering: false,     // experimental: use WebGL2 for GPU-accelerated rendering
     showSafeAreas: false,
     showGrid: false,
   },

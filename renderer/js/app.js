@@ -9,7 +9,7 @@ let _gateWorkletLoaded=null; // Promise — resolved once AudioWorklet module is
 
 const S={
   srcs:[], selId:null, items:[], wrtc:null, rtmp:null, streaming:false, roomCode:null,
-  ctx:null, anim:null,
+  ctx:null, anim:null, gl:null, _useGL:false, overlayCtx:null,
   drag:null, res:null, rot:null, rotC:null, crop:null, selItem:null,
   spacePan:false,
   alt:false, cw:1920, ch:1080,
@@ -22,15 +22,21 @@ const S={
   audioNodes:new Map(),  // srcId → { sourceNode, gainNode, monitorGain, analyser, effectsChain }
   audioEffects:new Map(), // srcId → { noiseGate, eqLow, eqMid, eqHigh, compressor, limiter, fxState }
   combinedStream:null,
+  _canvasVideoTrack:null,
   _recTimerInterval:null,
   _ffmpegRecPath:null,
   // ─── Persistent settings (mirrored from main process) ───
   settings:null,
   // ─── Performance ───
   targetFps:60,
+  _captureFps:60,  // FPS for recording/streaming (never reduced by reducedMotion)
   _lastRenderAt:0,
   _levelsRAF:null,
   _settingsSaveTimer:null,
+  _dirty:true,          // dirty-flag: true = scene needs repaint
+  _sortedItemsCache:null,
+  _srcMapCache:null,
+  _userFps:null,        // saved user FPS preference (restored when reducedMotion off)
   // ─── Stream status ───
   streamStatus:'offline',
   // ─── Hotkeys / view ───
@@ -141,13 +147,22 @@ function ensureAudioCtx(){
 function _rebuildCombinedStream(){
   if(!S.audioCtx||!S.audioDest) return;
   let vt=[];
-  if(S.combinedStream) vt=S.combinedStream.getVideoTracks();
+  // Reuse single canvas video track — never call captureStream() twice
+  if(S._canvasVideoTrack){
+    // Check track is still alive
+    if(S._canvasVideoTrack.readyState==='live') vt=[S._canvasVideoTrack];
+    else S._canvasVideoTrack=null;
+  }
   if(!vt.length){
     const cv=D.sceneCanvas;
-    if(cv && cv.captureStream) vt=cv.captureStream(30).getVideoTracks();
+    if(cv && cv.captureStream){
+      const cs=cv.captureStream(S._captureFps||60);
+      vt=cs.getVideoTracks();
+      if(vt.length) S._canvasVideoTrack=vt[0];
+    }
   }
   S.combinedStream=new MediaStream([...vt,...S.audioDest.stream.getAudioTracks()]);
-  console.log('[Audio] Combined: '+vt.length+'v, '+S.audioDest.stream.getAudioTracks().length+'a');
+  if(window.__sbDev) console.log('[Audio] Combined: '+vt.length+'v, '+S.audioDest.stream.getAudioTracks().length+'a');
   if(S.rtmp) S.rtmp.setCombinedStream(S.combinedStream);
 }
 
@@ -280,10 +295,11 @@ async function _connectSource(src){
   }
 
   S.audioNodes.set(src.id,{sourceNode,gainNode,monitorGain,analyser,
-    effectsChain:{gateNode,eqLow,eqMid,eqHigh,compressor,compMakeup,limiter}});
+    effectsChain:{gateNode,eqLow,eqMid,eqHigh,compressor,compMakeup,limiter},
+    rawSource,splitter});
   S.audioEffects.set(src.id,fxState);
   src.fxState=fxState;
-  console.log('[Audio] Connected with FX chain:',src.name);
+  if(window.__sbDev) console.log('[Audio] Connected with FX chain:',src.name);
 }
 
 function _disconnectSource(srcId){
@@ -300,7 +316,10 @@ function _disconnectSource(srcId){
     try{n.effectsChain.compMakeup.disconnect();}catch(e){}
     try{n.effectsChain.limiter.disconnect();}catch(e){}
   }
+  if(n.rawSource) try{n.rawSource.disconnect();}catch(e){}
+  if(n.splitter) try{n.splitter.disconnect();}catch(e){}
   S.audioNodes.delete(srcId);
+  S.audioEffects.delete(srcId);
 }
 
 function _updateGain(src){
@@ -316,6 +335,17 @@ function _resumeAudioCtx(){
 // ═══════════════════════════════════════════════════════════
 //  TRANSFORM MATH (unchanged)
 // ═══════════════════════════════════════════════════════════
+// ─── DIRTY-FLAG & CACHED LOOKUPS ────────────────────────────
+function _markDirty(){S._dirty=true;S._sortedItemsCache=null;S._srcMapCache=null;}
+function _getSortedItems(){
+  if(!S._sortedItemsCache) S._sortedItemsCache=[...S.items].sort((a,b)=>a.z-b.z);
+  return S._sortedItemsCache;
+}
+function _getSrcById(id){
+  if(!S._srcMapCache){S._srcMapCache=new Map();for(const s of S.srcs)S._srcMapCache.set(s.id,s);}
+  return S._srcMapCache.get(id);
+}
+
 function rotMat(deg){const r=deg*Math.PI/180,c=Math.cos(r),s=Math.sin(r);return{a:c,b:s,c:-s,d:c};}
 function localToWorld(it,lx,ly){const m=rotMat(it.rot);return{x:it.cx+m.a*lx+m.c*ly,y:it.cy+m.b*lx+m.d*ly};}
 function worldToLocal(it,wx,wy){const m=rotMat(-it.rot);const dx=wx-it.cx,dy=wy-it.cy;return{x:m.a*dx+m.c*dy,y:m.b*dx+m.d*dy};}
@@ -454,7 +484,7 @@ function toCanvas(cv,e){const r=cv.getBoundingClientRect();return{x:(e.clientX-r
 async function init(){
   if(window.__sbDev) console.log('[Init] StreamBro v12 starting...');
   Object.keys({
-    sceneCanvas:1,scenePreview:1,sceneEmpty:1,sourcesList:1,audioMixer:1,
+    sceneCanvas:1,sceneOverlay:1,scenePreview:1,sceneEmpty:1,sourcesList:1,audioMixer:1,
     btnConnectFriend:1,btnAddSource:1,btnMixerAdd:1,mixerAddDropdown:1,
     btnStartStream:1,btnPauseStream:1,btnStopStream:1,
     btnStartRec:1,btnPauseRec:1,btnStopRec:1,
@@ -487,8 +517,31 @@ async function init(){
   await _loadSettings();
   _applyTheme();
 
-  bind(); S.ctx=D.sceneCanvas.getContext('2d');
-  initRTMP(); setupScene(); loop();
+  bind();
+  // WebGL2 renderer — experimental, disabled by default until fully polished.
+  // Users can enable via settings → Performance → "GPU Rendering".
+  S._useGL = false;
+  if (S.settings && S.settings.ui && S.settings.ui.gpuRendering && window.GLRenderer) {
+    if (GLRenderer.init(D.sceneCanvas)) {
+      S._useGL = true;
+      S.gl = GLRenderer;
+      if (window.__sbDev) console.log('[Init] Using WebGL2 renderer (experimental)');
+    } else {
+      if (window.__sbDev) console.log('[Init] WebGL2 init failed, falling back to Canvas 2D');
+    }
+  }
+  if (!S._useGL) {
+    S.ctx = D.sceneCanvas.getContext('2d');
+    if (window.__sbDev) console.log('[Init] Using Canvas 2D renderer');
+  }
+  // Overlay canvas for UI (handles, grid, safe-areas) — always 2D
+  if (D.sceneOverlay) {
+    S.overlayCtx = D.sceneOverlay.getContext('2d');
+    D.sceneOverlay.width = S.cw;
+    D.sceneOverlay.height = S.ch;
+  }
+  initRTMP(); setupScene(); loop(); _syncOverlaySize();
+  _initHints();
   try{window.electronAPI.startSignalingServer();}catch(e){}
   // Listen for FFmpeg rec stop event
   try{window.electronAPI.onFFmpegRecStopped(data=>{
@@ -516,7 +569,9 @@ async function _loadSettings(){
   try{
     const s=await window.electronAPI.settingsLoad();
     S.settings=s;
-    S.targetFps=Math.max(15,Math.min(120,s.ui.targetFps||60));
+    S.targetFps=30;  // Preview always 30fps — saves CPU/GPU, output uses _captureFps
+    S._captureFps=Math.max(15,Math.min(120,s.ui.targetFps||60));  // FPS for captureStream (recording/streaming)
+    S._userFps=S._captureFps;
     S.reducedMotion=!!s.ui.reducedMotion;
     S.showGrid=!!s.ui.showGrid;
     S.showSafeAreas=!!s.ui.showSafeAreas;
@@ -534,7 +589,7 @@ async function _loadSettings(){
     // Apply scene resolution
     if(s.stream.resolution){
       const m=s.stream.resolution.match(/^(\d+)x(\d+)$/);
-      if(m){S.cw=parseInt(m[1]);S.ch=parseInt(m[2]);if(D.sceneCanvas){D.sceneCanvas.width=S.cw;D.sceneCanvas.height=S.ch;}}
+      if(m){S.cw=parseInt(m[1]);S.ch=parseInt(m[2]);if(D.sceneCanvas){D.sceneCanvas.width=S.cw;D.sceneCanvas.height=S.ch;}if(D.sceneOverlay){D.sceneOverlay.width=S.cw;D.sceneOverlay.height=S.ch;}if(S._useGL&&S.gl)S.gl.resize(S.cw,S.ch);}
     }
   }catch(e){
     if(window.__sbDev) console.warn('[Settings] Load failed:',e.message);
@@ -849,6 +904,61 @@ function _loadFxStateForName(name){
   return def;
 }
 
+// ─── Sync overlay canvas CSS position/size to match sceneCanvas (which uses object-fit:contain) ───
+function _syncOverlaySize(){
+  const cv = D.sceneCanvas;
+  const ov = D.sceneOverlay;
+  if(!cv || !ov) return;
+
+  // sceneCanvas uses object-fit:contain — its bounding rect reflects the "contained" size
+  const r = cv.getBoundingClientRect();
+  const parentR = cv.parentElement.getBoundingClientRect();
+
+  const w = Math.round(r.width);
+  const h = Math.round(r.height);
+  // Offset from parent's top-left
+  const left = Math.round(r.left - parentR.left);
+  const top = Math.round(r.top - parentR.top);
+
+  if(ov._syncW !== w || ov._syncH !== h || ov._syncL !== left || ov._syncT !== top){
+    ov.style.width = w + 'px';
+    ov.style.height = h + 'px';
+    ov.style.left = left + 'px';
+    ov.style.top = top + 'px';
+    ov._syncW = w;
+    ov._syncH = h;
+    ov._syncL = left;
+    ov._syncT = top;
+  }
+}
+
+// ─── Hint tooltips (floating div on body level, not clipped by any parent) ───
+function _initHints(){
+  const bubble=document.createElement('div');
+  bubble.id='hintBubble';
+  document.body.appendChild(bubble);
+  document.addEventListener('mouseover',(e)=>{
+    const el=e.target.closest('.hint-toggle');
+    if(!el){return;}
+    bubble.textContent=el.dataset.hint||'';
+    const r=el.getBoundingClientRect();
+    let left=r.left+r.width/2-110;
+    let top=r.top-8;
+    // Clamp to viewport
+    left=Math.max(4,Math.min(left,window.innerWidth-228));
+    // Position above or below depending on space
+    if(top-120<0){top=r.bottom+8;bubble.style.top=top+'px';}else{bubble.style.top='';}
+    bubble.style.left=left+'px';
+    bubble.style.bottom=(window.innerHeight-r.top+8)+'px';
+    bubble.style.top='';
+    bubble.classList.add('show');
+  });
+  document.addEventListener('mouseout',(e)=>{
+    const el=e.target.closest('.hint-toggle');
+    if(el){bubble.classList.remove('show');}
+  });
+}
+
 function initRTMP(){
   S.rtmp=new RTMPOutput();S.rtmp.setCanvas(D.sceneCanvas);
   S.rtmp.onStart=()=>{S.streaming=true;D.btnStartStream.classList.add('streaming');D.btnStartStream.innerHTML='<span class="stream-dot"></span> Подключение...';D.btnPauseStream.disabled=false;D.btnStopStream.disabled=false;msg('Подключение к серверу...','info');};
@@ -902,12 +1012,20 @@ function initRTMP(){
 }
 
 function loop(){
+  let _lastOverlaySync=0;
   (function f(){
     const now=performance.now();
     const minDelta=1000/Math.max(15,Math.min(120,S.targetFps||60));
     if(now-S._lastRenderAt>=minDelta-0.5){
       S._lastRenderAt=now;
-      try{render();}catch(e){if(window.__sbDev)console.error('[render]',e);}
+      // Dirty-flag: skip full render when scene is static (no video sources, not streaming, not dragging)
+      const hasVideoSources=S.srcs.some(s=>s.el&&s.el.readyState>=2&&(s.type==='camera'||s.type==='screen'||s.type==='window'||s.type==='peer-video'));
+      if(S._dirty||hasVideoSources||S.streaming||S.drag||S.res||S.rot||S.rotC||S.crop){
+        try{render();}catch(e){if(window.__sbDev)console.error('[render]',e);}
+        S._dirty=false;
+      }
+      // Sync overlay position to canvas (cheap, throttled to ~1Hz)
+      if(now-_lastOverlaySync>1000){_syncOverlaySize();_lastOverlaySync=now;}
       // Co-session: while user is actively dragging/resizing, queue throttled
       // updates for the affected item so the friend sees motion in real time.
       try{_coTickActiveEdit();}catch(e){}
@@ -1039,7 +1157,7 @@ function bind(){
   D.streamBitrateInput.oninput=_scheduleSettingsSave;
   D.streamResolution.onchange=()=>{
     const[w,h]=D.streamResolution.value.split('x').map(Number);
-    S.cw=w;S.ch=h;D.sceneCanvas.width=w;D.sceneCanvas.height=h;
+    S.cw=w;S.ch=h;D.sceneCanvas.width=w;D.sceneCanvas.height=h;if(D.sceneOverlay){D.sceneOverlay.width=w;D.sceneOverlay.height=h;}if(S._useGL&&S.gl)S.gl.resize(w,h);
     _rebuildCombinedStream();
     _scheduleSettingsSave();
   };
@@ -1095,7 +1213,7 @@ function bind(){
       if(sel){togLock(sel);e.preventDefault();}
     }
     if(code==='KeyG'||e.key==='g'||e.key==='G'){
-      S.showGrid=!S.showGrid;_scheduleSettingsSave();e.preventDefault();
+      S.showGrid=!S.showGrid;_scheduleSettingsSave();_markDirty();e.preventDefault();
     }
     if((code==='KeyM'||e.key==='m'||e.key==='M')&&!e.ctrlKey&&!e.metaKey){
       if(sel){const s=S.srcs.find(x=>x.id===sel);if(s&&s.stream&&s.stream.getAudioTracks().length){s.muted=!s.muted;_updateGain(s);renderMixer();e.preventDefault();}}
@@ -1142,26 +1260,16 @@ function bind(){
   }
 }
 
-function rebuildZ(){S.items.forEach(it=>{const idx=S.srcs.findIndex(s=>s.id===it.sid);if(idx>=0)it.z=S.srcs.length-idx;});}
+function rebuildZ(){S.items.forEach(it=>{const idx=S.srcs.findIndex(s=>s.id===it.sid);if(idx>=0)it.z=S.srcs.length-idx;});_markDirty();}
 
 // ═══════════════════════════════════════════════════════════
 //  SCENE INTERACTION (unchanged)
 // ═══════════════════════════════════════════════════════════
 function setupScene(){
   const cv=D.sceneCanvas;
-  // Resize observer: scale canvas display size to fill available area while keeping 16:9 aspect
+  // Resize observer: sync both canvas and overlay CSS sizes
   if(typeof ResizeObserver!=='undefined'&&D.scenePreview){
-    const ro=new ResizeObserver(()=>{
-      const area=D.scenePreview;
-      const aw=area.clientWidth-4, ah=area.clientHeight-4;
-      if(aw>0&&ah>0){
-        const scaleX=aw/S.cw, scaleY=ah/S.ch;
-        const scale=Math.min(scaleX,scaleY);
-        cv.style.width=Math.round(S.cw*scale)+'px';
-        cv.style.height=Math.round(S.ch*scale)+'px';
-        cv.style.maxWidth='none';cv.style.maxHeight='none';
-      }
-    });
+    const ro=new ResizeObserver(()=>{_syncOverlaySize();});
     ro.observe(D.scenePreview);
   }
   cv.onmousedown=e=>{
@@ -1225,6 +1333,7 @@ function setupScene(){
       if(sid){const it=S.items.find(s=>s.sid===sid);if(it)_snapCircle(it);}
     }
     S.drag=null;S.res=null;S.rot=null;S.rotC=null;S.crop=null;
+    _markDirty();
     // Final flush of the in-progress edit so peers see the exact final state
     if(finishedSid&&S.co){
       const it=S.items.find(s=>s.sid===finishedSid);
@@ -1396,68 +1505,24 @@ function _resetTransform(it){
 // ═══════════════════════════════════════════════════════════
 function render(){
   S.frameAnimTime=performance.now()/1000;
-  const c=S.ctx;if(!c)return;const cw=S.cw,ch=S.ch;
-  // Канвас остаётся ПРОЗРАЧНЫМ — фон сцены рисуется CSS-ом под ним. Это позволяет
-  // edge-dissolve реально РАСТВОРЯТЬ края в прозрачность (а не показывать чёрный).
+  const cw=S.cw,ch=S.ch;
+
+  // ─── WebGL path ───
+  if(S._useGL && S.gl && S.gl.ready){
+    _renderGL(cw, ch);
+    _renderOverlay(cw, ch);
+    if(S.streaming&&S.rtmp)D.streamUptime.textContent=S.rtmp.getUptime();
+    return;
+  }
+
+  // ─── Canvas 2D fallback path ───
+  const c=S.ctx;if(!c)return;
   c.clearRect(0,0,cw,ch);
-  // Тонкая декоративная рамка сцены (рисуем поверх — она сама по себе прозрачна).
-  c.strokeStyle='rgba(255,210,60,.12)';c.lineWidth=4;c.strokeRect(2,2,cw-4,ch-4);
-  // Optional rule-of-thirds grid — visible but unobtrusive
-  if(S.showGrid){
-    c.save();
-    // Glow outline first (wider, more transparent)
-    c.strokeStyle='rgba(255,210,60,.35)';
-    c.lineWidth=4;
-    c.shadowColor='rgba(255,210,60,.45)';c.shadowBlur=10;
-    c.beginPath();
-    for(let i=1;i<3;i++){
-      c.moveTo((cw/3)*i,0);c.lineTo((cw/3)*i,ch);
-      c.moveTo(0,(ch/3)*i);c.lineTo(cw,(ch/3)*i);
-    }
-    c.stroke();
-    c.shadowBlur=0;
-    // Sharp inner line
-    c.strokeStyle='rgba(255,255,255,.55)';
-    c.lineWidth=1.5;
-    c.setLineDash([10,6]);
-    c.beginPath();
-    for(let i=1;i<3;i++){
-      c.moveTo((cw/3)*i,0);c.lineTo((cw/3)*i,ch);
-      c.moveTo(0,(ch/3)*i);c.lineTo(cw,(ch/3)*i);
-    }
-    c.stroke();
-    // Center cross marker
-    c.setLineDash([]);
-    c.strokeStyle='rgba(255,210,60,.7)';
-    c.lineWidth=1.5;
-    const cs=14;
-    c.beginPath();
-    c.moveTo(cw/2-cs,ch/2);c.lineTo(cw/2+cs,ch/2);
-    c.moveTo(cw/2,ch/2-cs);c.lineTo(cw/2,ch/2+cs);
-    c.stroke();
-    c.restore();
-  }
-  // Optional safe-area overlays (5% / 10%)
-  if(S.showSafeAreas){
-    c.save();
-    c.strokeStyle='rgba(255,210,60,.35)';
-    c.lineWidth=2;
-    c.setLineDash([8,8]);
-    const o5=Math.min(cw,ch)*0.05;
-    const o10=Math.min(cw,ch)*0.10;
-    c.strokeRect(o5,o5,cw-o5*2,ch-o5*2);
-    c.strokeStyle='rgba(231,76,60,.35)';
-    c.strokeRect(o10,o10,cw-o10*2,ch-o10*2);
-    c.setLineDash([]);
-    c.restore();
-  }
-  for(const it of[...S.items].sort((a,b)=>a.z-b.z)){
-    const src=S.srcs.find(s=>s.id===it.sid);if(!src||!src.visible||!src.el)continue;const v=src.el;if(v.readyState<2)continue;const cr=it.crop||{l:0,t:0,r:0,b:0};
+  for(const it of _getSortedItems()){
+    const src=_getSrcById(it.sid);if(!src||!src.visible||!src.el)continue;const v=src.el;if(v.readyState<2)continue;const cr=it.crop||{l:0,t:0,r:0,b:0};
     try{
     c.save();c.translate(it.cx,it.cy);c.rotate(it.rot*Math.PI/180);c.scale(it.flipH?-1:1,it.flipV?-1:1);
-    // Draw outward glow BEFORE clipping (so it extends beyond mask)
     _drawBorderGlowOut(c,it);
-    // Apply crop mask clipping (before drawImage so mask affects the video)
     const maskType=it.cropMask||'none';
     if(maskType==='circle'){
       const cr_=Math.min(it.w,it.h)/2;
@@ -1468,7 +1533,6 @@ function render(){
     }else if(maskType==='rect'){
       c.beginPath();c.rect(-it.w/2,-it.h/2,it.w,it.h);c.clip();
     }
-    // Apply camera settings via filter ONLY if non-default
     const cs=src.camSettings;
     const hasCamFx=cs&&(cs.brightness!==0||cs.contrast!==0||cs.saturation!==0||(cs.temperature&&cs.temperature!==6500)||(cs.sharpness&&cs.sharpness>0)||(cs.hue&&cs.hue!==0)||(cs.sepia&&cs.sepia!==0));
     if(hasCamFx){
@@ -1499,46 +1563,166 @@ function render(){
         c.drawImage(v,sx-pdx*scX,sy-pdy*scY,sw,sh,-it.w/2,-it.h/2,it.w,it.h);
       }
     }catch(e){}
-    // Edge dissolve (transparent fade) is handled inside _drawBorder so it works for preview too.
     if(hasCamFx) c.filter='none';
-    // Draw border/frame inside the clip (inward glow + stroke + blur + vignette)
     _drawBorder(c,it);
     c.restore();
     }catch(e){try{c.restore();}catch(e2){}}
-    if(S.selItem===it.sid){
-      c.save();c.translate(it.cx,it.cy);c.rotate(it.rot*Math.PI/180);
-      const accent=(_themeAccentCache())||'#ffd23c';
-      const handleStroke=(_themeHandleStrokeCache())||'#1a1a2e';
-      const isLocked=src.locked;
-      // Outline (slightly thicker, with subtle outer glow for premium feel)
-      c.shadowColor=accent;c.shadowBlur=isLocked?0:8;
-      c.strokeStyle=isLocked?'#f0a030':accent;c.lineWidth=3;
-      c.strokeRect(-it.w/2,-it.h/2,it.w,it.h);
-      c.shadowBlur=0;
-      if(!isLocked){
-        c.fillStyle=accent;
-        const hw=it.w/2,hh=it.h/2;
-        for(const p of[{x:-hw,y:-hh},{x:hw,y:-hh},{x:-hw,y:hh},{x:hw,y:hh},{x:0,y:-hh},{x:0,y:hh},{x:-hw,y:0},{x:hw,y:0}]){
-          c.beginPath();c.arc(p.x,p.y,HANDLE_R,0,Math.PI*2);c.fill();
-          c.strokeStyle=handleStroke;c.lineWidth=2;c.stroke();
-        }
-        c.beginPath();c.moveTo(hw+4,0);c.lineTo(hw+ROT_OFF-HANDLE_R,0);
-        c.strokeStyle=accent;c.lineWidth=2;c.stroke();
-        c.beginPath();c.arc(hw+ROT_OFF,0,HANDLE_R+2,0,Math.PI*2);c.fillStyle=accent;c.fill();
-        c.strokeStyle=handleStroke;c.lineWidth=2;c.stroke();
-      }else{
-        // Lock badge — small lock icon at top-right corner
-        const hw=it.w/2,hh=it.h/2;
-        c.fillStyle='rgba(240,160,48,.92)';
-        c.beginPath();c.arc(hw-12,-hh+12,10,0,Math.PI*2);c.fill();
-        c.strokeStyle='#1a1a2e';c.lineWidth=1;c.stroke();
-        c.fillStyle='#1a1a2e';c.font='bold 11px Segoe UI';c.textAlign='center';c.textBaseline='middle';
-        c.fillText('🔒',hw-12,-hh+12);
-      }
-      c.restore();
-    }
   }
   if(S.streaming&&S.rtmp)D.streamUptime.textContent=S.rtmp.getUptime();
+  _renderOverlay(cw, ch);
+}
+
+// ─── WebGL render path ───
+function _renderGL(cw, ch){
+  const gl = S.gl;
+  if(!gl || !gl.ready) return;
+  gl.beginFrame();
+
+  for(const it of _getSortedItems()){
+    const src=_getSrcById(it.sid);
+    if(!src||!src.visible||!src.el) continue;
+    const v=src.el;
+    if(v.readyState<2) continue;
+    const cr=it.crop||{l:0,t:0,r:0,b:0};
+    const fs=it.frameSettings;
+
+    // Draw outward glow (GPU blur)
+    if(fs && fs.glow && fs.glow.enabled && fs.glow.outward){
+      const glowSize = Math.max(2, fs.glow.size || 15);
+      let glowColor = fs.glow.color || fs.color || '#ffd23c';
+      let opacity = fs.opacity || 1.0;
+      const animType = S.reducedMotion ? 'none' : (fs.animation || 'none');
+      const animI = fs.animIntensity !== undefined ? fs.animIntensity : 1.0;
+      const t = S.frameAnimTime || 0;
+      if(animType==='breathe') opacity = fs.opacity * (Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
+      else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;glowColor=_hslToHex(hsl.h,hsl.s,hsl.l);}
+      else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;glowColor=_hslToHex(h2.h,90,55);}
+      opacity=Math.max(0,Math.min(1,opacity));
+      gl.drawGlowOut(it, fs, glowColor, glowSize, opacity);
+    }
+
+    // Draw video source as textured quad
+    gl.drawSource(src.id, v, it, cr);
+
+    // Draw vignette
+    if(fs && fs.vignette && fs.vignette.enabled){
+      gl.drawVignette(it, fs.vignetteColor || '#000000', fs.vignette.strength, fs.vignette.size);
+    }
+
+    // Draw border stroke
+    if(fs && fs.enabled){
+      let thickness = fs.thickness, opacity = fs.opacity, color = fs.color;
+      let animType = S.reducedMotion ? 'none' : (fs.animation || 'none');
+      const animI = fs.animIntensity !== undefined ? fs.animIntensity : 1.0;
+      const t = S.frameAnimTime || 0;
+      if(animType==='pulse') thickness=fs.thickness*(1+0.5*animI*Math.sin(t*3));
+      else if(animType==='breathe') opacity=fs.opacity*(Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
+      else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;color=_hslToHex(hsl.h,hsl.s,hsl.l);}
+      else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;color=_hslToHex(h2.h,90,55);}
+      thickness=Math.max(1,thickness);opacity=Math.max(0,Math.min(1,opacity));
+
+      const style = fs.style || 'solid';
+      if(style === 'glow'){
+        // Glow style uses blur
+        gl.drawGlowOut(it, fs, color, thickness * 3, opacity * 0.5);
+      } else {
+        gl.drawBorderStroke(it, color, thickness, opacity, style);
+      }
+    }
+  }
+}
+
+// ─── Overlay render (handles, grid, safe-areas) — drawn on separate overlayCanvas, NOT captured by captureStream() ───
+function _renderOverlay(cw, ch){
+  const oc = S.overlayCtx;
+  if(!oc) return;
+  oc.clearRect(0, 0, cw, ch);
+
+  // Thin decorative scene border
+  oc.strokeStyle='rgba(255,210,60,.12)';oc.lineWidth=4;oc.strokeRect(2,2,cw-4,ch-4);
+
+  // Grid
+  if(S.showGrid){
+    oc.save();
+    oc.strokeStyle='rgba(255,210,60,.35)';
+    oc.lineWidth=4;
+    oc.shadowColor='rgba(255,210,60,.45)';oc.shadowBlur=10;
+    oc.beginPath();
+    for(let i=1;i<3;i++){
+      oc.moveTo((cw/3)*i,0);oc.lineTo((cw/3)*i,ch);
+      oc.moveTo(0,(ch/3)*i);oc.lineTo(cw,(ch/3)*i);
+    }
+    oc.stroke();
+    oc.shadowBlur=0;
+    oc.strokeStyle='rgba(255,255,255,.55)';
+    oc.lineWidth=1.5;
+    oc.setLineDash([10,6]);
+    oc.beginPath();
+    for(let i=1;i<3;i++){
+      oc.moveTo((cw/3)*i,0);oc.lineTo((cw/3)*i,ch);
+      oc.moveTo(0,(ch/3)*i);oc.lineTo(cw,(ch/3)*i);
+    }
+    oc.stroke();
+    oc.setLineDash([]);
+    oc.strokeStyle='rgba(255,210,60,.7)';
+    oc.lineWidth=1.5;
+    const cs=14;
+    oc.beginPath();
+    oc.moveTo(cw/2-cs,ch/2);oc.lineTo(cw/2+cs,ch/2);
+    oc.moveTo(cw/2,ch/2-cs);oc.lineTo(cw/2,ch/2+cs);
+    oc.stroke();
+    oc.restore();
+  }
+
+  // Safe areas
+  if(S.showSafeAreas){
+    oc.save();
+    oc.strokeStyle='rgba(255,210,60,.35)';
+    oc.lineWidth=2;
+    oc.setLineDash([8,8]);
+    const o5=Math.min(cw,ch)*0.05;
+    const o10=Math.min(cw,ch)*0.10;
+    oc.strokeRect(o5,o5,cw-o5*2,ch-o5*2);
+    oc.strokeStyle='rgba(231,76,60,.35)';
+    oc.strokeRect(o10,o10,cw-o10*2,ch-o10*2);
+    oc.setLineDash([]);
+    oc.restore();
+  }
+
+  // Selection handles (on top of everything)
+  for(const it of _getSortedItems()){
+    if(S.selItem!==it.sid) continue;
+    const src=_getSrcById(it.sid);
+    if(!src) continue;
+    oc.save();oc.translate(it.cx,it.cy);oc.rotate(it.rot*Math.PI/180);
+    const accent=(_themeAccentCache())||'#ffd23c';
+    const handleStroke=(_themeHandleStrokeCache())||'#1a1a2e';
+    const isLocked=src.locked;
+    oc.shadowColor=accent;oc.shadowBlur=isLocked?0:8;
+    oc.strokeStyle=isLocked?'#f0a030':accent;oc.lineWidth=3;
+    oc.strokeRect(-it.w/2,-it.h/2,it.w,it.h);
+    oc.shadowBlur=0;
+    if(!isLocked){
+      oc.fillStyle=accent;
+      const hw=it.w/2,hh=it.h/2;
+      for(const p of[{x:-hw,y:-hh},{x:hw,y:-hh},{x:-hw,y:hh},{x:hw,y:hh},{x:0,y:-hh},{x:0,y:hh},{x:-hw,y:0},{x:hw,y:0}]){
+        oc.beginPath();oc.arc(p.x,p.y,HANDLE_R,0,Math.PI*2);oc.fill();
+        oc.strokeStyle=handleStroke;oc.lineWidth=2;oc.stroke();
+      }
+      oc.beginPath();oc.moveTo(hw+4,0);oc.lineTo(hw+ROT_OFF-HANDLE_R,0);
+      oc.strokeStyle=accent;oc.lineWidth=2;oc.stroke();
+      oc.beginPath();oc.arc(hw+ROT_OFF,0,HANDLE_R+2,0,Math.PI*2);oc.fillStyle=accent;oc.fill();
+      oc.strokeStyle=handleStroke;oc.lineWidth=2;oc.stroke();
+    }else{
+      const hw=it.w/2,hh=it.h/2;
+      oc.fillStyle='rgba(240,160,48,.92)';
+      oc.beginPath();oc.arc(hw-12,-hh+12,10,0,Math.PI*2);oc.fill();
+      oc.strokeStyle='#1a1a2e';oc.lineWidth=1;oc.stroke();
+      oc.fillStyle='#1a1a2e';oc.font='bold 11px Segoe UI';oc.textAlign='center';oc.textBaseline='middle';
+      oc.fillText('🔒',hw-12,-hh+12);
+    }
+    oc.restore();
+  }
 }
 
 function _roundedRectPath(c,x,y,w,h,r){
@@ -1562,7 +1746,7 @@ function _drawBorderGlowOut(c,it){
   const rr=isRounded?Math.min(it.w,it.h)*0.15:0;
   const t=S.frameAnimTime||0;
   let color=fs.color,glowColor=fs.glow.color,thickness=fs.thickness,opacity=fs.opacity;
-  const animType=fs.animation||'none';
+  const animType=S.reducedMotion?'none':(fs.animation||'none');
   const animI=fs.animIntensity!==undefined?fs.animIntensity:1.0;
   if(animType==='pulse') thickness=fs.thickness*(1+0.5*animI*Math.sin(t*3));
   else if(animType==='breathe') opacity=fs.opacity*(Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
@@ -1614,9 +1798,12 @@ function _drawBorderGlowOut(c,it){
     c.restore();
   }else{
     // ── SHAPE-AWARE HALO для rect / rounded / none — мягче и диффузнее.
-    // 6 проходов: больше Gaussian-blur, плавнее нарастание, меньшая пиковая альфа.
+    // Reduced motion: 2 passes instead of 6 (saves ~60% CPU on glow rendering)
     const baseW=Math.max(thickness*1.0, reach*0.08);
-    const passes=[
+    const passes=S.reducedMotion?[
+      {blur:reach*0.35, lw:baseW+reach*0.40, alpha:0.18},
+      {blur:reach*0.08, lw:baseW+reach*0.08, alpha:0.35},
+    ]:[
       {blur:reach*1.05, lw:baseW+reach*1.30, alpha:0.04},
       {blur:reach*0.80, lw:baseW+reach*0.95, alpha:0.07},
       {blur:reach*0.55, lw:baseW+reach*0.65, alpha:0.11},
@@ -1679,7 +1866,7 @@ function _drawBorder(c,it){
   if(!fs||!fs.enabled) return;
 
   let thickness=fs.thickness,opacity=fs.opacity,color=fs.color;
-  let animType=fs.animation||'none';
+  let animType=S.reducedMotion?'none':(fs.animation||'none');
   let glowColor=fs.glow?fs.glow.color:color;
   let glowSize=fs.glow?fs.glow.size:0;
 
@@ -1724,7 +1911,8 @@ function _drawBorder(c,it){
     else if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);c.fill();}
     else c.fillRect(-hw,-hh,it.w,it.h);
     c.restore();
-    // 2) Мягкие blur-страйки внутрь — два прохода, низкая альфа.
+    // 2) Мягкие blur-страйки внутрь — при reducedMotion пропускаем для скорости
+    if(!S.reducedMotion){
     const layers=[
       {blur:glowSize*1.4,alpha:0.10,lw:thickness*0.8},
       {blur:glowSize*0.6,alpha:0.20,lw:thickness*0.5},
@@ -1732,6 +1920,7 @@ function _drawBorder(c,it){
     for(const layer of layers){
       c.save();c.shadowColor=glowColor;c.shadowBlur=layer.blur;c.strokeStyle=color;c.lineWidth=layer.lw;c.globalAlpha=opacity*layer.alpha;
       strokeMask();c.shadowBlur=0;c.restore();
+    }
     }
   }
 
@@ -1756,7 +1945,7 @@ function _drawBorder(c,it){
   }
   else if(style==='ridge'){c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.max(0,_hexToHSL(color).l-25));c.lineWidth=thickness;c.setLineDash([]);strokeMask();c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.min(100,_hexToHSL(color).l+25));c.lineWidth=thickness*0.35;pathMaskInset(thickness*0.35);c.stroke();}
   else if(style==='inset'){c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.min(100,_hexToHSL(color).l+20));c.lineWidth=thickness*0.5;c.setLineDash([]);strokeMask();c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.max(0,_hexToHSL(color).l-20));c.lineWidth=thickness*0.5;pathMaskInset(thickness*0.5);c.stroke();}
-  else if(style==='glow'){[{blur:thickness*3,alpha:0.1},{blur:thickness*2,alpha:0.2},{blur:thickness,alpha:0.4},{blur:thickness*0.4,alpha:0.7}].forEach(l=>{c.save();c.shadowColor=color;c.shadowBlur=l.blur;c.strokeStyle=color;c.lineWidth=thickness*0.3;c.globalAlpha=opacity*l.alpha;strokeMask();c.shadowBlur=0;c.restore();});}
+  else if(style==='glow'){(S.reducedMotion?[{blur:thickness,alpha:0.5},{blur:thickness*0.4,alpha:0.8}]:[{blur:thickness*3,alpha:0.1},{blur:thickness*2,alpha:0.2},{blur:thickness,alpha:0.4},{blur:thickness*0.4,alpha:0.7}]).forEach(l=>{c.save();c.shadowColor=color;c.shadowBlur=l.blur;c.strokeStyle=color;c.lineWidth=thickness*0.3;c.globalAlpha=opacity*l.alpha;strokeMask();c.shadowBlur=0;c.restore();});}
 
   if(animType==='flow'&&style!=='gradient'){c.save();c.globalAlpha=opacity*0.6;c.strokeStyle=color;c.lineWidth=thickness*0.6;c.setLineDash([thickness*4,thickness*8]);c.lineDashOffset=-t*80;strokeMask();c.setLineDash([]);c.restore();}
 
@@ -1853,9 +2042,9 @@ async function _populateSettingsModal(){
     };
   });
   if(D.settingsFps){
-    D.settingsFps.value=String(S.targetFps||60);
+    D.settingsFps.value=String(S._captureFps||60);
     D.settingsFps.onchange=()=>{
-      S.targetFps=parseInt(D.settingsFps.value)||60;
+      S._captureFps=parseInt(D.settingsFps.value)||60;
       _scheduleSettingsSave();
     };
   }
@@ -1865,15 +2054,16 @@ async function _populateSettingsModal(){
       S.reducedMotion=D.settingsReducedMotion.checked;
       _applyTheme();
       _scheduleSettingsSave();
+      _markDirty();
     };
   }
   if(D.settingsShowGrid){
     D.settingsShowGrid.checked=!!S.showGrid;
-    D.settingsShowGrid.onchange=()=>{S.showGrid=D.settingsShowGrid.checked;_scheduleSettingsSave();};
+    D.settingsShowGrid.onchange=()=>{S.showGrid=D.settingsShowGrid.checked;_scheduleSettingsSave();_markDirty();};
   }
   if(D.settingsShowSafeArea){
     D.settingsShowSafeArea.checked=!!S.showSafeAreas;
-    D.settingsShowSafeArea.onchange=()=>{S.showSafeAreas=D.settingsShowSafeArea.checked;_scheduleSettingsSave();};
+    D.settingsShowSafeArea.onchange=()=>{S.showSafeAreas=D.settingsShowSafeArea.checked;_scheduleSettingsSave();_markDirty();};
   }
   if(D.settingsAppMeta){
     try{
@@ -2097,7 +2287,7 @@ function addVideoSource(type,name,stream,isP=false,pid=null,opts){
   if(src.el) addScene(src,!opts.suppressBroadcast); // create item; broadcast unless we're applying a remote op
   if(!isP&&S.wrtc&&stream) S.wrtc.addLocalStreamToAllPeers(stream);
   _wireTrackEndHandlers(src);
-  rebuildZ();renderSources();updateE();
+  rebuildZ();renderSources();updateE();_markDirty();
   if(!isP&&S.co&&!opts.suppressBroadcast) S.co.broadcastSourceAdd(src);
   return id;
 }
@@ -2105,6 +2295,8 @@ function addVideoSource(type,name,stream,isP=false,pid=null,opts){
 function rmSrc(sid){
   const i=S.srcs.findIndex(s=>s.id===sid);if(i===-1)return;const s=S.srcs[i];
   _disconnectSource(sid);
+  // Clean up GL texture for this source
+  if(S._useGL && S.gl) S.gl.removeSource(sid);
   // Save source data for Ctrl+Z restore before stopping tracks
   const savedItem=S.items.find(x=>x.sid===sid);
   const restoreData={
@@ -2141,13 +2333,13 @@ function rmSrc(sid){
   // Push undo entry with delete-source data
   S._undoStack.push({label:'удаление «'+s.name+'»',type:'delete-source',restore:restoreData,t:Date.now()});
   while(S._undoStack.length>S._undoMax) S._undoStack.shift();
-  rebuildZ();renderSources();renderMixer();updateE();
+  rebuildZ();renderSources();renderMixer();updateE();_markDirty();
   // Broadcast removal — only the owner deletes; remote peers can also request removal but
   // CoScene relies on LWW + each peer's own copy: broadcast whenever a local action triggered it.
   if(S.co&&!_isRemote()) S.co.broadcastSourceRemove(sid);
 }
-function togVis(sid){const s=S.srcs.find(x=>x.id===sid);if(s){s.visible=!s.visible;renderSources();updateE();_coSafe(co=>co.broadcastSourceUpdate(s));}}
-function togLock(sid){const s=S.srcs.find(x=>x.id===sid);if(s){s.locked=!s.locked;if(s.locked&&S.selItem===sid){S.selItem=null;S.selId=null;}renderSources();msg(s.locked?'Источник заблокирован':'Источник разблокирован','info');_coSafe(co=>co.broadcastSourceUpdate(s));}}
+function togVis(sid){const s=S.srcs.find(x=>x.id===sid);if(s){s.visible=!s.visible;renderSources();updateE();_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}}
+function togLock(sid){const s=S.srcs.find(x=>x.id===sid);if(s){s.locked=!s.locked;if(s.locked&&S.selItem===sid){S.selItem=null;S.selId=null;}renderSources();msg(s.locked?'Источник заблокирован':'Источник разблокирован','info');_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}}
 function selSrc(sid){
   const s=S.srcs.find(x=>x.id===sid);
   if(s&&s.locked){msg('Источник заблокирован — снимите блокировку для редактирования','info');return;}
@@ -2177,8 +2369,9 @@ function renderSources(){
     const lockSvg=s.locked?'<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>':'<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>';
     const tl={camera:'Камера',screen:'Экран',window:'Окно'}[s.type]||s.type;
     const gearBtn=s.el?`<button class="btn-icon" data-a="cam" title="Настройки источника"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>`:'';
+    const typeIcon={camera:'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',screen:'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',window:'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="10" y1="21" x2="14" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>','peer-video':'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>'}[s.type]||'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/></svg>';
     el.innerHTML=`<span class="source-order">${idx+1}</span>
-      <div class="source-icon"><video autoplay muted playsinline></video></div>
+      <div class="source-icon">${typeIcon}</div>
       <div class="source-info"><div class="source-name">${esc(s.name)}</div><div class="source-type">${tl}${s.isPeer?' (друг)':''}${s.locked?' · 🔒':''}</div></div>
       <div class="source-actions">
         ${gearBtn}
@@ -2186,8 +2379,6 @@ function renderSources(){
         <button class="btn-icon ${!s.visible?'':'toggle-on'}" data-a="tog" title="${s.visible?'Скрыть':'Показать'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${ic}</svg></button>
         <button class="btn-icon" data-a="del" title="Удалить"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button>
       </div>`;
-    const tv=el.querySelector('.source-icon video');
-    if(tv)tv.srcObject=s.stream;
     D.sourcesList.appendChild(el);
   });
 }
@@ -2255,8 +2446,12 @@ function addMixerCh(s){
 }
 
 function updateLevels(){
+  // Skip level metering when mixer panel is hidden — saves CPU
+  const mixerVisible=D.audioMixer&&D.audioMixer.offsetParent!==null;
   for(const[sid,n]of S.audioNodes){
-    const d=new Uint8Array(n.analyser.frequencyBinCount);
+    // Pre-allocate Uint8Array once per analyser (stored on the node)
+    if(!n._levelBuf) n._levelBuf=new Uint8Array(n.analyser.frequencyBinCount);
+    const d=n._levelBuf;
     n.analyser.getByteFrequencyData(d);
     let sum=0;for(let i=0;i<d.length;i++)sum+=d[i];
     const avg=sum/d.length;
@@ -2267,6 +2462,7 @@ function updateLevels(){
       el.style.width=pct+'%';
       el.classList.toggle('clipping',pct>=95);
     }
+    if(!mixerVisible) continue; // skip DOM writes when hidden
     const ch=el?.closest('.audio-channel');
     if(!ch)continue;
     const slider=ch.querySelector('.audio-slider');
@@ -2277,8 +2473,15 @@ function updateLevels(){
     if(src&&src.muted){dbEl.textContent='MUTE';}
     else if(src){dbEl.textContent=_toDb(avg);}
   }
-  // Single owner of the levels RAF — guard against duplicate scheduling
-  S._levelsRAF=requestAnimationFrame(updateLevels);
+  // Throttle level metering to ~15 fps — sufficient for visual feedback, saves CPU
+  const now=performance.now();
+  if(!S._lastLevelAt) S._lastLevelAt=0;
+  if(now-S._lastLevelAt>=66){
+    S._lastLevelAt=now;
+    S._levelsRAF=requestAnimationFrame(updateLevels);
+  }else{
+    S._levelsRAF=requestAnimationFrame(updateLevels);
+  }
 }
 
 function _ensureLevelsLoop(){
@@ -2324,10 +2527,10 @@ function _applyFxState(srcId){
     });
   }
 
-  // EQ: all 0 = flat (off)
-  c.eqLow.gain.setTargetAtTime(fx.eqLow,t,0.02);
-  c.eqMid.gain.setTargetAtTime(fx.eqMid,t,0.02);
-  c.eqHigh.gain.setTargetAtTime(fx.eqHigh,t,0.02);
+  // EQ: apply values only when enabled, otherwise flat
+  c.eqLow.gain.setTargetAtTime(fx.eq?fx.eqLow:0,t,0.02);
+  c.eqMid.gain.setTargetAtTime(fx.eq?fx.eqMid:0,t,0.02);
+  c.eqHigh.gain.setTargetAtTime(fx.eq?fx.eqHigh:0,t,0.02);
 
   // Compressor
   c.compressor.threshold.setTargetAtTime(fx.compressor?fx.compThresh:0,t,0.02);
@@ -2354,8 +2557,8 @@ function _showFxModal(srcId){
   modal.className='modal-overlay';modal.id='fxModal';modal.style.display='flex';
 
   const gateOn=fx.noiseGate;
-  const eqOn=fx.eq||(fx.eqLow!==0||fx.eqMid!==0||fx.eqHigh!==0);
-  const compOn=fx.compressor||fx.compThresh<0;
+  const eqOn=fx.eq;
+  const compOn=fx.compressor;
   const limOn=fx.limiter;
 
   modal.innerHTML=`<div class="modal glass" style="width:420px">
@@ -2363,7 +2566,7 @@ function _showFxModal(srcId){
     <button class="btn-icon" id="btnCloseFx"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="modal-body fx-body">
       <div class="fx-section">
-        <div class="fx-header"><span class="fx-name">Шумоподавление</span><label class="fx-switch"><input type="checkbox" id="fxGate" ${gateOn?'checked':''}/><span class="fx-switch-label" id="gateBadge">${gateOn?'ВКЛ':'ВЫКЛ'}</span></label></div>
+        <div class="fx-header"><span class="fx-name">Шумоподавление</span><button class="fx-toggle ${gateOn?'on':''}" id="fxGate">${gateOn?'ВКЛ':'ВЫКЛ'}</button></div>
         <div class="fx-params">
           <div class="fx-row" style="gap:6px">
             <button class="btn fx-preset-btn${fx.gateThresh===-30&&fx.gateRange===-20?' active':''}" data-preset="light">Лёгкое</button>
@@ -2378,7 +2581,7 @@ function _showFxModal(srcId){
         </div>
       </div>
       <div class="fx-section">
-        <div class="fx-header"><span class="fx-name">Эквалайзер</span><span class="fx-badge ${eqOn?'on':''}" id="eqBadge">${eqOn?'ВКЛ':'ВЫКЛ'}</span></div>
+        <div class="fx-header"><span class="fx-name">Эквалайзер</span><button class="fx-toggle ${eqOn?'on':''}" id="fxEq">${eqOn?'ВКЛ':'ВЫКЛ'}</button></div>
         <div class="fx-params">
           <div class="fx-row" style="gap:6px">
             <button class="btn fx-preset-btn fx-eq-preset${fx.eqLow===3&&fx.eqMid===0&&fx.eqHigh===-2?' active':''}" data-eqpreset="warm">Тёплый</button>
@@ -2392,7 +2595,7 @@ function _showFxModal(srcId){
         </div>
       </div>
       <div class="fx-section">
-        <div class="fx-header"><span class="fx-name">Компрессор</span><label class="fx-switch"><input type="checkbox" id="fxComp" ${compOn?'checked':''}/><span class="fx-switch-label" id="compBadge">${compOn?'ВКЛ':'ВЫКЛ'}</span></label></div>
+        <div class="fx-header"><span class="fx-name">Компрессор</span><button class="fx-toggle ${compOn?'on':''}" id="fxComp">${compOn?'ВКЛ':'ВЫКЛ'}</button></div>
         <div class="fx-params">
           <div class="fx-row" style="gap:6px">
             <button class="btn fx-preset-btn fx-comp-preset${fx.compThresh===-18&&fx.compRatio===3&&fx.compGain===6?' active':''}" data-comppreset="gentle">Мягкий</button>
@@ -2405,7 +2608,7 @@ function _showFxModal(srcId){
         </div>
       </div>
       <div class="fx-section">
-        <div class="fx-header"><span class="fx-name">Лимитер</span><label class="fx-switch"><input type="checkbox" id="fxLimiter" ${limOn?'checked':''}/><span class="fx-switch-label" id="limBadge">${limOn?'ВКЛ':'ВЫКЛ'}</span></label></div>
+        <div class="fx-header"><span class="fx-name">Лимитер</span><button class="fx-toggle ${limOn?'on':''}" id="fxLimiter">${limOn?'ВКЛ':'ВЫКЛ'}</button></div>
         <div class="fx-params">
           <div class="fx-row"><span class="fx-label">Порог</span><input type="range" class="fx-slider" id="fxLimThresh" min="-12" max="0" value="${fx.limThresh||-3}" step="1"/><span class="fx-val" id="fxLimThreshVal">${fx.limThresh||-3}dB</span></div>
         </div>
@@ -2439,7 +2642,8 @@ function _showFxModal(srcId){
 
   // Reset button
   document.getElementById('btnFxReset').onclick=()=>{
-    document.getElementById('fxGate').checked=false;
+    document.getElementById('fxGate').textContent='ВЫКЛ';
+    document.getElementById('fxGate').className='fx-toggle';
     document.getElementById('fxGateThresh').value=-40;
     document.getElementById('fxGateThreshVal').textContent='-40dB';
     document.getElementById('fxGateRange').value=-40;
@@ -2451,32 +2655,28 @@ function _showFxModal(srcId){
     document.getElementById('fxGateRelease').value=150;
     document.getElementById('fxGateReleaseVal').textContent='150мс';
     document.querySelectorAll('.fx-preset-btn').forEach(b=>b.classList.remove('active'));
-    document.getElementById('gateBadge').textContent='ВЫКЛ';
-    document.getElementById('gateBadge').className='fx-switch-label';
+    document.getElementById('fxEq').textContent='ВЫКЛ';
+    document.getElementById('fxEq').className='fx-toggle';
     document.getElementById('fxEqLow').value=0;
     document.getElementById('fxEqMid').value=0;
     document.getElementById('fxEqHigh').value=0;
     document.getElementById('fxEqLowVal').textContent='0dB';
     document.getElementById('fxEqMidVal').textContent='0dB';
     document.getElementById('fxEqHighVal').textContent='0dB';
-    document.getElementById('eqBadge').textContent='ВЫКЛ';
-    document.getElementById('eqBadge').className='fx-badge';
     document.querySelectorAll('.fx-eq-preset').forEach(b=>b.classList.remove('active'));
-    document.getElementById('fxComp').checked=false;
-    document.getElementById('fxCompThresh').value=0;
+    document.getElementById('fxComp').textContent='ВЫКЛ';
+    document.getElementById('fxComp').className='fx-toggle';
+    document.getElementById('fxCompThresh').value=-24;
     document.getElementById('fxCompRatio').value=4;
     document.getElementById('fxCompGain').value=6;
-    document.getElementById('fxCompThreshVal').textContent='0dB';
+    document.getElementById('fxCompThreshVal').textContent='-24dB';
     document.getElementById('fxCompRatioVal').textContent='4:1';
     document.getElementById('fxCompGainVal').textContent='+6dB';
-    document.getElementById('compBadge').textContent='ВЫКЛ';
-    document.getElementById('compBadge').className='fx-switch-label';
     document.querySelectorAll('.fx-comp-preset').forEach(b=>b.classList.remove('active'));
-    document.getElementById('fxLimiter').checked=false;
+    document.getElementById('fxLimiter').textContent='ВЫКЛ';
+    document.getElementById('fxLimiter').className='fx-toggle';
     document.getElementById('fxLimThresh').value=-3;
     document.getElementById('fxLimThreshVal').textContent='-3dB';
-    document.getElementById('limBadge').textContent='ВЫКЛ';
-    document.getElementById('limBadge').className='fx-switch-label';
     liveUpdate();
   };
 
@@ -2489,7 +2689,7 @@ function _showFxModal(srcId){
     const t=ctx.currentTime;
 
     // Gate
-    const gateOn=document.getElementById('fxGate').checked;
+    const gateOn=document.getElementById('fxGate').classList.contains('on');
     const gateThreshV=parseInt(document.getElementById('fxGateThresh').value);
     const gateRangeV=parseInt(document.getElementById('fxGateRange').value);
     const gateAttackV=parseInt(document.getElementById('fxGateAttack').value);
@@ -2510,27 +2710,27 @@ function _showFxModal(srcId){
     document.getElementById('fxGateAttackVal').textContent=gateAttackV+'мс';
     document.getElementById('fxGateHoldVal').textContent=gateHoldV+'мс';
     document.getElementById('fxGateReleaseVal').textContent=gateReleaseV+'мс';
-    document.getElementById('gateBadge').textContent=gateOn?'ВКЛ':'ВЫКЛ';
-    document.getElementById('gateBadge').className='fx-switch-label'+(gateOn?' on':'');
+    document.getElementById('fxGate').textContent=gateOn?'ВКЛ':'ВЫКЛ';
+    document.getElementById('fxGate').className='fx-toggle'+(gateOn?' on':'');
 
     // EQ
+    const eqOn=document.getElementById('fxEq').classList.contains('on');
     const eqLowV=parseInt(document.getElementById('fxEqLow').value);
     const eqMidV=parseInt(document.getElementById('fxEqMid').value);
     const eqHighV=parseInt(document.getElementById('fxEqHigh').value);
-    const eqOn=eqLowV!==0||eqMidV!==0||eqHighV!==0;
-    c.eqLow.gain.setTargetAtTime(eqLowV,t,0.02);
-    c.eqMid.gain.setTargetAtTime(eqMidV,t,0.02);
-    c.eqHigh.gain.setTargetAtTime(eqHighV,t,0.02);
+    c.eqLow.gain.setTargetAtTime(eqOn?eqLowV:0,t,0.02);
+    c.eqMid.gain.setTargetAtTime(eqOn?eqMidV:0,t,0.02);
+    c.eqHigh.gain.setTargetAtTime(eqOn?eqHighV:0,t,0.02);
     src.fxState.eqLow=eqLowV; src.fxState.eqMid=eqMidV; src.fxState.eqHigh=eqHighV;
     src.fxState.eq=eqOn;
     document.getElementById('fxEqLowVal').textContent=(eqLowV>0?'+':'')+eqLowV+'dB';
     document.getElementById('fxEqMidVal').textContent=(eqMidV>0?'+':'')+eqMidV+'dB';
     document.getElementById('fxEqHighVal').textContent=(eqHighV>0?'+':'')+eqHighV+'dB';
-    document.getElementById('eqBadge').textContent=eqOn?'ВКЛ':'ВЫКЛ';
-    document.getElementById('eqBadge').className='fx-badge'+(eqOn?' on':'');
+    document.getElementById('fxEq').textContent=eqOn?'ВКЛ':'ВЫКЛ';
+    document.getElementById('fxEq').className='fx-toggle'+(eqOn?' on':'');
 
     // Compressor
-    const compOn=document.getElementById('fxComp').checked;
+    const compOn=document.getElementById('fxComp').classList.contains('on');
     const compThreshV=parseInt(document.getElementById('fxCompThresh').value);
     const compRatioV=parseFloat(document.getElementById('fxCompRatio').value);
     const compGainV=parseInt(document.getElementById('fxCompGain').value);
@@ -2542,18 +2742,18 @@ function _showFxModal(srcId){
     document.getElementById('fxCompThreshVal').textContent=compThreshV+'dB';
     document.getElementById('fxCompRatioVal').textContent=compRatioV+':1';
     document.getElementById('fxCompGainVal').textContent='+'+compGainV+'dB';
-    document.getElementById('compBadge').textContent=compOn?'ВКЛ':'ВЫКЛ';
-    document.getElementById('compBadge').className='fx-switch-label'+(compOn?' on':'');
+    document.getElementById('fxComp').textContent=compOn?'ВКЛ':'ВЫКЛ';
+    document.getElementById('fxComp').className='fx-toggle'+(compOn?' on':'');
 
     // Limiter
-    const limOn=document.getElementById('fxLimiter').checked;
+    const limOn=document.getElementById('fxLimiter').classList.contains('on');
     const limThreshV=parseInt(document.getElementById('fxLimThresh').value);
     c.limiter.threshold.setTargetAtTime(limOn?limThreshV:0,t,0.02);
     c.limiter.ratio.setTargetAtTime(limOn?20:1,t,0.02);
     src.fxState.limiter=limOn; src.fxState.limThresh=limThreshV;
     document.getElementById('fxLimThreshVal').textContent=limThreshV+'dB';
-    document.getElementById('limBadge').textContent=limOn?'ВКЛ':'ВЫКЛ';
-    document.getElementById('limBadge').className='fx-switch-label'+(limOn?' on':'');
+    document.getElementById('fxLimiter').textContent=limOn?'ВКЛ':'ВЫКЛ';
+    document.getElementById('fxLimiter').className='fx-toggle'+(limOn?' on':'');
 
     // Sync to audioEffects map
     S.audioEffects.set(srcId,{...src.fxState});
@@ -2564,11 +2764,16 @@ function _showFxModal(srcId){
     if(fxBtn) fxBtn.classList.toggle('fx-active',hasFx);
   };
 
-  // All checkboxes and sliders = live update
-  ['fxGate','fxComp','fxLimiter'].forEach(id=>{
+  // Toggle buttons: click toggles on/off state then live-updates
+  ['fxGate','fxEq','fxComp','fxLimiter'].forEach(id=>{
     const el=document.getElementById(id);
-    if(el) el.onchange=liveUpdate;
+    if(el) el.onclick=()=>{
+      el.classList.toggle('on');
+      el.textContent=el.classList.contains('on')?'ВКЛ':'ВЫКЛ';
+      liveUpdate();
+    };
   });
+  // All sliders = live update
   ['fxGateThresh','fxGateRange','fxGateAttack','fxGateHold','fxGateRelease','fxEqLow','fxEqMid','fxEqHigh','fxCompThresh','fxCompRatio','fxCompGain','fxLimThresh'].forEach(id=>{
     const el=document.getElementById(id);
     if(el) el.oninput=liveUpdate;
@@ -2584,7 +2789,8 @@ function _showFxModal(srcId){
     btn.onclick=()=>{
       const p=gatePresets[btn.dataset.preset];
       if(!p) return;
-      document.getElementById('fxGate').checked=true;
+      document.getElementById('fxGate').classList.add('on');
+      document.getElementById('fxGate').textContent='ВКЛ';
       document.getElementById('fxGateThresh').value=p.gateThresh;
       document.getElementById('fxGateRange').value=p.gateRange;
       document.getElementById('fxGateAttack').value=p.gateAttack;
@@ -2607,6 +2813,8 @@ function _showFxModal(srcId){
     btn.onclick=()=>{
       const p=eqPresets[btn.dataset.eqpreset];
       if(!p) return;
+      document.getElementById('fxEq').classList.add('on');
+      document.getElementById('fxEq').textContent='ВКЛ';
       document.getElementById('fxEqLow').value=p.eqLow;
       document.getElementById('fxEqMid').value=p.eqMid;
       document.getElementById('fxEqHigh').value=p.eqHigh;
@@ -2626,7 +2834,8 @@ function _showFxModal(srcId){
     btn.onclick=()=>{
       const p=compPresets[btn.dataset.comppreset];
       if(!p) return;
-      document.getElementById('fxComp').checked=true;
+      document.getElementById('fxComp').classList.add('on');
+      document.getElementById('fxComp').textContent='ВКЛ';
       document.getElementById('fxCompThresh').value=p.compThresh;
       document.getElementById('fxCompRatio').value=p.compRatio;
       document.getElementById('fxCompGain').value=p.compGain;
@@ -3460,7 +3669,7 @@ function startStream(){
   S.rtmp.setStreamKey(k);
   S.rtmp.setBitrate(parseInt(D.streamBitrateInput.value)||6000);
   S.rtmp.setResolution(D.streamResolution.value||'1280x720');
-  S.rtmp.setFps(30);
+  S.rtmp.setFps(S._captureFps||60);
   S.rtmp.start();
 }
 

@@ -52,6 +52,7 @@
       <div class="scene-area">
         <div class="scene-preview" id="scenePreview">
           <canvas id="sceneCanvas" width="1920" height="1080"></canvas>
+          <canvas id="sceneOverlay" width="1920" height="1080"></canvas>
           <div class="scene-empty" id="sceneEmpty">
             <div class="scene-empty-logo">
               <img src="../assets/icon.png" class="scene-empty-logo-img" alt="StreamBro"/>
@@ -67,11 +68,12 @@
         <div class="accordion-item open" id="accPlatforms">
           <button class="accordion-header" data-acc="accPlatforms"><span>Платформы</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg></button>
           <div class="accordion-body">
-            <div class="form-group"><label>Платформа</label><select id="streamPlatform"><option value="twitch">Twitch</option><option value="kick">Kick</option><option value="youtube">YouTube</option><option value="custom">Свой сервер</option></select></div>
-            <div class="form-group"><label>Ключ стрима</label><div class="input-row"><input type="password" id="streamKey" placeholder="live_xxxxxxxxxxxxx"/><button class="btn-icon sm" id="btnToggleKeyVisibility" title="Показать/скрыть"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button></div></div>
+            <div class="form-group"><label>Платформа <span class="hint-toggle" data-hint="Куда идёт ваш стрим. Ключ и сервер подставляются автоматически. Выберите «Свой сервер» для кастомного RTMP.">?</span></label><select id="streamPlatform"><option value="twitch">Twitch</option><option value="kick">Kick</option><option value="youtube">YouTube</option><option value="custom">Свой сервер</option></select></div>
+            <div class="form-group"><label>Ключ стрима <span class="hint-toggle" data-hint="Уникальный ключ для трансляции. Берётся в настройках платформы (Twitch Dashboard, Kick Creator Dashboard). Хранится зашифрованным.">?</span></label><div class="input-row"><input type="password" id="streamKey" placeholder="live_xxxxxxxxxxxxx"/><button class="btn-icon sm" id="btnToggleKeyVisibility" title="Показать/скрыть"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button></div></div>
             <div class="form-group" id="customServerGroup" style="display:none"><label>RTMP сервер</label><input type="text" id="customServer" placeholder="rtmp://ваш-сервер.com/live/"/></div>
-            <div class="form-group"><label>Разрешение стрима</label><select id="streamResolution"><option value="3840x2160">3840x2160 (4K)</option><option value="2560x1440">2560x1440 (2K)</option><option value="1920x1080">1920x1080 (Full HD)</option><option value="1280x720" selected>1280x720 (HD)</option><option value="854x480">854x480 (SD)</option></select></div>
-            <div class="form-group"><label>Битрейт (кбит/с)</label><input type="number" id="streamBitrateInput" value="6000" min="1000" max="30000" step="500"/></div>
+            <div class="form-group"><label>Разрешение стрима <span class="hint-toggle" data-hint="Размер кадра видео на выходе. 1280x720 (HD) — оптимально для Twitch и Kick. 1920x1080 — для YouTube и мощных ПК.">?</span></label><select id="streamResolution"><option value="3840x2160">3840x2160 (4K)</option><option value="2560x1440">2560x1440 (2K)</option><option value="1920x1080">1920x1080 (Full HD)</option><option value="1280x720" selected>1280x720 (HD)</option><option value="854x480">854x480 (SD)</option></select></div>
+            <div class="form-group"><label>Битрейт (кбит/с) <span class="hint-toggle" data-hint="Объём видеоданных в секунду. Выше = чётче, но нужна хорошая сеть. 6000 — стандарт для 720p/1080p. Kick free: макс. 4500.">?</span></label><input type="number" id="streamBitrateInput" value="6000" min="1000" max="30000" step="500"/></div>
+            <div class="form-group"><label>FPS (кадров/сек) <span class="hint-toggle" data-hint="Частота кадров на выходе (стрим/запись). 30 — стандарт для стрима, меньше нагрузка. 60 — плавное движение, выше нагрузка на ПК.">?</span></label><select id="settingsFps"><option value="30">30 — для стрима / слабый ПК</option><option value="60" selected>60 — плавно (по умолчанию)</option><option value="120">120 — максимум (для мощных ПК)</option></select></div>
           </div>
         </div>
         <div class="accordion-item" id="accStream">
@@ -230,21 +232,13 @@
             </div>
           </div>
           <div class="form-group">
-            <label>FPS предпросмотра</label>
-            <select id="settingsFps">
-              <option value="30">30 — экономно</option>
-              <option value="60">60 — плавно (по умолчанию)</option>
-              <option value="120">120 — максимум (для мощных ПК)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)"><input type="checkbox" id="settingsReducedMotion"/> Уменьшить анимации (для слабых ПК)</label>
+            <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)"><input type="checkbox" id="settingsReducedMotion"/> Уменьшить анимации <span class="hint-toggle" data-hint="Отключает анимации эффектов рамок (пульсация, перелив, радуга). Превью всегда 30fps для экономии ресурсов. Качество стрима и записи НЕ меняется.">?</span></label>
           </div>
           <div class="form-group">
             <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)"><input type="checkbox" id="settingsShowGrid"/> Показывать сетку на сцене</label>
           </div>
           <div class="form-group">
-            <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)"><input type="checkbox" id="settingsShowSafeArea"/> Показывать safe-area (5%/10% отступы)</label>
+            <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)"><input type="checkbox" id="settingsShowSafeArea"/> Показывать safe-area <span class="hint-toggle" data-hint="Отступы 5% и 10% от краёв — чтобы важный контент не обрезался на мобильных устройствах зрителей.">?</span></label>
           </div>
           <div class="form-group" style="margin-bottom:0">
             <label>Версия / папка настроек</label>
@@ -345,7 +339,7 @@
       </div>
       <div class="update-toast-body">
         <div class="update-toast-title" id="updateToastTitle">Доступно обновление</div>
-        <div class="update-toast-desc" id="updateToastDesc">Версия 1.1.0</div>
+        <div class="update-toast-desc" id="updateToastDesc">Версия 1.2.0</div>
       </div>
       <div class="update-toast-actions">
         <button class="btn sm" id="updateToastDownload">Скачать</button>
@@ -390,6 +384,7 @@
     <div class="notifications" id="notifications"></div>
   </div>
   <script src="js/sounds.js"></script>
+  <script src="js/gl-renderer.js"></script>
   <script src="js/webrtc.js"></script>
   <script src="js/coscene.js"></script>
   <script src="js/rtmp-output.js"></script>

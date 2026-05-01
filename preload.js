@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   profileOpenLogin:  () => ipcRenderer.invoke('profile-open-login'),
   profileOpenPage:   () => ipcRenderer.invoke('profile-open-page'),
   profileDevLogin:   (payload) => ipcRenderer.invoke('profile-dev-login', payload),
+  profileLogin:      (creds) => ipcRenderer.invoke('profile-login', creds),
+  profileRegister:   (creds) => ipcRenderer.invoke('profile-register', creds),
   onProfileUpdated:  (cb) => ipcRenderer.on('profile-updated', (_, data) => cb(data)),
 
   // ─── Friends / chat (1.1.0) ───

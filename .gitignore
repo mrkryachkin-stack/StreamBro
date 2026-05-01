@@ -36,6 +36,11 @@ vendor/ffmpeg.exe
 .vscode/
 *.code-workspace
 
+# ─── Server data (generated at runtime) ───
+server/data/
+server/logs/
+server/node_modules/
+
 # ─── Temp / cache ───
 *.tmp
 *.bak

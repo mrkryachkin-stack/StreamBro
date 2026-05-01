@@ -1,0 +1,43 @@
+# StreamBro — .gitignore
+# Protects server architecture, internal docs, and build artifacts from public repo.
+
+# ─── Node / Electron ───
+node_modules/
+dist/
+out/
+
+# ─── OS junk ───
+Thumbs.db
+.DS_Store
+desktop.ini
+*.log
+
+# ─── Private / internal docs — NOT for public repo ───
+# These contain server architecture, security model, and deployment plans
+# that give competitive advantage. Share only with team members directly.
+docs/SERVER_PLAN.md
+docs/SECURITY.md
+docs/BUILD_NOTES.md
+
+# ─── Backups — development history, not for repo ───
+backups/
+
+# ─── Vendor binaries — too large for git, distributed via releases ───
+vendor/ffmpeg.exe
+
+# ─── Dev tools ───
+.cursor/
+*.swp
+*.swo
+*~
+
+# ─── IDE ───
+.idea/
+.vscode/
+*.code-workspace
+
+# ─── Temp / cache ───
+*.tmp
+*.bak
+.env
+.env.local

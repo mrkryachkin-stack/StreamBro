@@ -68,13 +68,9 @@
 
 ### Известные ограничения 1.1.0
 
-- Сервер `streambro.online` ещё не развёрнут — кнопка «Регистрация» откроет
-  страницу, но deep-link обратно сработает только после того, как сайт
-  будет онлайн. До этого момента можно использовать **«Локальный
-  профиль»** или dev-кнопку «Добавить друга локально» в модалке.
-- Auto-update получит ошибку `update not available` пока не настроен
-  `updates.streambro.online`. Это корректно деградирует — приложение
-  продолжает работать.
+- Сервер `streambro.ru` развёрнут и работает: API, сигналинг, SSL, баг-репорты, авто-обновления, скачивание portable zip. Регистрация/авторизация через сайт работает (deep-link `streambro://login?token=...`). Друзья и чат — локально (in-memory), серверная репликация будет добавлена в следующей версии.
+- **Build на Windows** без Developer Mode: `npx electron-builder --win --dir --config.win.signAndEditExecutable=false` — обходит winCodeSign symlink-ошибку. Полный NSIS-сборщик требует включения Developer Mode в Windows.
+- Code signing отсутствует — SmartScreen warning при установке.
 
 ## v12 — Production-readiness pass (предыдущая)
 

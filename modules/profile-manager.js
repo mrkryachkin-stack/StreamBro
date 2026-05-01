@@ -15,9 +15,9 @@
 const { safeStorage, shell } = require('electron');
 const settingsMod = require('../settings');
 
-const SIGNUP_URL  = 'https://streambro.online/signup';
-const LOGIN_URL   = 'https://streambro.online/login';
-const PROFILE_URL = 'https://streambro.online/profile';
+const SIGNUP_URL  = 'https://streambro.ru/signup';
+const LOGIN_URL   = 'https://streambro.ru/login';
+const PROFILE_URL = 'https://streambro.ru/profile';
 
 let _settings = null;
 let _onChange = () => {};

@@ -351,7 +351,7 @@ class WebRTCManager {
     this.onPeersList = null;
     this.onDataChannel = null;     // (dc, peerId) — for CoScene
     this.onPeerTrack = null;       // (event, peerId) — raw track event
-    this.signalingServerUrl = 'ws://localhost:7890';
+    this.signalingServerUrl = 'wss://streambro.ru/signaling';
 
     this.turnUrl = '';
     this.turnUser = '';

@@ -100,7 +100,7 @@ const DEFAULT_SETTINGS = {
   bugReports: {
     queueSize: 0,            // pending reports waiting for upload
     lastSentAt: 0,
-    endpoint: 'https://api.streambro.online/bugs',  // override if self-hosted
+    endpoint: 'https://streambro.ru/api/bugs',  // override if self-hosted
     autoSend: true,          // send when network available
   },
 

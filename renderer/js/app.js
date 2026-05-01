@@ -538,7 +538,7 @@ async function _loadSettings(){
     }
   }catch(e){
     if(window.__sbDev) console.warn('[Settings] Load failed:',e.message);
-    S.settings={ui:{theme:'dark',targetFps:60,reducedMotion:false,showGrid:false,showSafeAreas:false},stream:{platform:'twitch',customServer:'',resolution:'1280x720',bitrate:6000,fps:30,key:''},audio:{},recording:{},signaling:{server:'ws://localhost:7890',turnUrl:'',turnUser:'',turnPass:''},fxStateByName:{}};
+    S.settings={ui:{theme:'dark',targetFps:60,reducedMotion:false,showGrid:false,showSafeAreas:false},stream:{platform:'twitch',customServer:'',resolution:'1280x720',bitrate:6000,fps:30,key:''},audio:{},recording:{},signaling:{server:'wss://streambro.ru/signaling',turnUrl:'',turnUser:'',turnPass:''},fxStateByName:{}};
   }
 }
 
@@ -570,7 +570,7 @@ async function _persistSettings(extra){
       key:D.streamKey?D.streamKey.value:'',
     },
     signaling:{
-      server:D.signalingServer?D.signalingServer.value.trim()||'ws://localhost:7890':'ws://localhost:7890',
+      server:D.signalingServer?D.signalingServer.value.trim()||'wss://streambro.ru/signaling':'wss://streambro.ru/signaling',
       turnUrl :D.turnServerUrl ?D.turnServerUrl.value.trim():'',
       turnUser:D.turnServerUser?D.turnServerUser.value.trim():'',
       turnPass:D.turnServerPass?D.turnServerPass.value.trim():'',
@@ -3479,8 +3479,8 @@ function startRecording(){
 // ═══════════════════════════════════════════════════════════
 //  WebRTC
 // ═══════════════════════════════════════════════════════════
-async function createRoom(){try{const now=Date.now();if(now-S._lastRoomCreateAt<5000){msg('Подождите 5 секунд перед созданием новой комнаты','info');return;}S._lastRoomCreateAt=now;if(!S.wrtc)S.wrtc=new WebRTCManager();S.wrtc.setSignalingServer(D.signalingServer.value.trim()||'ws://localhost:7890');S.wrtc.setTurnConfig(D.turnServerUrl?D.turnServerUrl.value:'',D.turnServerUser?D.turnServerUser.value:'',D.turnServerPass?D.turnServerPass.value:'');setupW();D.connectError.style.display='none';D.btnCreateRoom.textContent='Подключение...';D.btnCreateRoom.disabled=true;await S.wrtc.connect();S.wrtc.createRoom();}catch(e){D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;}}
-async function joinRoom(){try{if(!S.wrtc)S.wrtc=new WebRTCManager();S.wrtc.setSignalingServer(D.signalingServer.value.trim()||'ws://localhost:7890');S.wrtc.setTurnConfig(D.turnServerUrl?D.turnServerUrl.value:'',D.turnServerUser?D.turnServerUser.value:'',D.turnServerPass?D.turnServerPass.value:'');setupW();const c=D.joinRoomCode.value.trim().toUpperCase();if(!c){D.connectError.textContent='Введите код';D.connectError.style.display='block';return;}D.connectError.style.display='none';D.btnJoinRoom.textContent='Подключение...';D.btnJoinRoom.disabled=true;await S.wrtc.connect();S.wrtc.joinRoom(c);}catch(e){D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';D.btnJoinRoom.textContent='Подключиться';D.btnJoinRoom.disabled=false;}}
+async function createRoom(){try{const now=Date.now();if(now-S._lastRoomCreateAt<5000){msg('Подождите 5 секунд перед созданием новой комнаты','info');return;}S._lastRoomCreateAt=now;if(!S.wrtc)S.wrtc=new WebRTCManager();S.wrtc.setSignalingServer(D.signalingServer.value.trim()||'wss://streambro.ru/signaling');S.wrtc.setTurnConfig(D.turnServerUrl?D.turnServerUrl.value:'',D.turnServerUser?D.turnServerUser.value:'',D.turnServerPass?D.turnServerPass.value:'');setupW();D.connectError.style.display='none';D.btnCreateRoom.textContent='Подключение...';D.btnCreateRoom.disabled=true;await S.wrtc.connect();S.wrtc.createRoom();}catch(e){D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;}}
+async function joinRoom(){try{if(!S.wrtc)S.wrtc=new WebRTCManager();S.wrtc.setSignalingServer(D.signalingServer.value.trim()||'wss://streambro.ru/signaling');S.wrtc.setTurnConfig(D.turnServerUrl?D.turnServerUrl.value:'',D.turnServerUser?D.turnServerUser.value:'',D.turnServerPass?D.turnServerPass.value:'');setupW();const c=D.joinRoomCode.value.trim().toUpperCase();if(!c){D.connectError.textContent='Введите код';D.connectError.style.display='block';return;}D.connectError.style.display='none';D.btnJoinRoom.textContent='Подключение...';D.btnJoinRoom.disabled=true;await S.wrtc.connect();S.wrtc.joinRoom(c);}catch(e){D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';D.btnJoinRoom.textContent='Подключиться';D.btnJoinRoom.disabled=false;}}
 function setupW(){
   // ── Co-session engine — wired ONCE per page lifetime ──
   if(!S.co){

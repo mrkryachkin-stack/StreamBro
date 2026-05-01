@@ -13,10 +13,10 @@ let _settings = null;
 let _checkTimer = null;
 let _appVersion = '0.0.0';
 
-const CHECK_URL = 'https://streambro.online/downloads/latest.json';
+const CHECK_URL = 'https://streambro.ru/api/updates/win/latest.json';
 // Expected JSON format:
 // { "version": "1.1.1", "date": "2026-05-15", "changelog": "Fixed chat, added sounds",
-//   "downloadUrl": "https://streambro.online/downloads/StreamBro-1.1.1-portable.zip",
+//   "downloadUrl": "https://streambro.ru/download/StreamBro-1.1.1-portable.zip",
 //   "sha512": "..." }
 
 function _tryLoad() {

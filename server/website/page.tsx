@@ -7,8 +7,20 @@ import Image from "next/image";
 /* ═══════════════════════════════════════════════════════════════
    CHANGES — version changelog (update with each release)
    ═══════════════════════════════════════════════════════════════ */
-const VERSION = "1.2.1";
+const VERSION = "1.2.2";
 const CHANGES: Record<string, string[]> = {
+  "1.2.2": [
+    "Админ-панель — управление пользователями, комнатами, баг-репортами",
+    "Чат — редактирование и удаление сообщений",
+    "Друзья — аватарки, онлайн-статус синхронизирован сайт↔приложение",
+    "Комнаты — серверное создание, автозакрытие через 24ч после выхода",
+    "Google OAuth — понятные имена пользователей (name1234)",
+    "Редактирование username в профиле",
+    "Облачная синхронизация настроек (AES-256-GCM)",
+    "Баг-репорты сохраняются в базу данных",
+    "Брендинг — StreamBro в диспетчере задач, кастомный значок",
+    "Сайт — «Мой профиль» в навбаре, редиректы для залогиненных",
+  ],
   "1.2.1": [
     "Свечение рамок — прямоугольные, круглые, внутрь и наружу",
     "Квадратные и скруглённые маски для источников",
@@ -146,7 +158,7 @@ function Navbar() {
 /* ═══════════════════════════════════════════════════════════════
    HERO — bold, animated, unique
    ═══════════════════════════════════════════════════════════════ */
-function Hero({ onChangelog }: { onChangelog: () => void }) {
+function Hero({ onChangelog, downloadUrl }: { onChangelog: () => void; downloadUrl: string }) {
   const [hoverBadge, setHoverBadge] = useState(false);
 
   return (
@@ -235,7 +247,7 @@ function Hero({ onChangelog }: { onChangelog: () => void }) {
         </p>
 
         <div style={{ display: "flex", gap: "0.75rem", justifyContent: "center", flexWrap: "wrap" }}>
-          <a href="/api/download/portable/StreamBro-1.2.1-portable.zip" className="btn-gold btn-glow" style={{ fontSize: "1.05rem", padding: "1rem 2.5rem" }}>
+          <a href={downloadUrl} className="btn-gold btn-glow" style={{ fontSize: "1.05rem", padding: "1rem 2.5rem" }}>
             Скачать бесплатно
           </a>
           <a href="#features" className="btn-ghost" style={{ fontSize: "1rem", padding: "1rem 2rem" }}>
@@ -567,7 +579,7 @@ function SafetySection() {
 /* ═══════════════════════════════════════════════════════════════
    DOWNLOAD — prominent, clear FREE
    ═══════════════════════════════════════════════════════════════ */
-function DownloadSection() {
+function DownloadSection({ downloadUrl }: { downloadUrl: string }) {
   return (
     <section id="download" style={{ padding: "8rem 0", position: "relative" }}>
       <div className="container">
@@ -611,7 +623,7 @@ function DownloadSection() {
             </p>
 
             <div style={{ display: "flex", gap: "0.75rem", justifyContent: "center", flexWrap: "wrap", marginBottom: "2rem" }}>
-              <a href="/api/download/portable/StreamBro-1.2.1-portable.zip" className="btn-gold btn-glow" style={{ fontSize: "1.1rem", padding: "1.1rem 3rem" }}>
+              <a href={downloadUrl} className="btn-gold btn-glow" style={{ fontSize: "1.1rem", padding: "1.1rem 3rem" }}>
                 Скачать бесплатно
               </a>
               <Link href="/register" className="btn-ghost" style={{ fontSize: "1rem", padding: "1.1rem 2rem" }}>
@@ -641,7 +653,7 @@ function DownloadSection() {
 /* ═══════════════════════════════════════════════════════════════
    CTA — gradient, bold
    ═══════════════════════════════════════════════════════════════ */
-function CtaBanner() {
+function CtaBanner({ downloadUrl }: { downloadUrl: string }) {
   return (
     <section style={{ padding: "6rem 0" }}>
       <div className="container">
@@ -661,7 +673,7 @@ function CtaBanner() {
           <p style={{ color: "var(--text-1)", fontSize: "1.1rem", marginBottom: "2rem", position: "relative", maxWidth: 480, marginLeft: "auto", marginRight: "auto" }}>
             Бесплатно. Без карты. Аккаунт нужен только для P2P и друзей.
           </p>
-          <a href="/api/download/portable/StreamBro-1.2.1-portable.zip" className="btn-gold btn-glow" style={{ fontSize: "1.1rem", padding: "1.1rem 3rem", position: "relative" }}>
+          <a href={downloadUrl} className="btn-gold btn-glow" style={{ fontSize: "1.1rem", padding: "1.1rem 3rem", position: "relative" }}>
             Скачать StreamBro
           </a>
         </div>
@@ -719,17 +731,27 @@ function Footer() {
    ═══════════════════════════════════════════════════════════════ */
 export default function HomePage() {
   const [showChanges, setShowChanges] = useState(false);
+  const [downloadUrl, setDownloadUrl] = useState(`/api/download/portable/StreamBro-${VERSION}-portable.zip`);
+
+  useEffect(() => {
+    fetch("/api/download/latest")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.url) setDownloadUrl(d.url);
+      })
+      .catch(() => {});
+  }, []);
 
   return (
     <main>
       <ChangesModal open={showChanges} onClose={() => setShowChanges(false)} />
       <Navbar />
-      <Hero onChangelog={() => setShowChanges(true)} />
+      <Hero onChangelog={() => setShowChanges(true)} downloadUrl={downloadUrl} />
       <Features />
       <HowItWorks />
       <SafetySection />
-      <DownloadSection />
-      <CtaBanner />
+      <DownloadSection downloadUrl={downloadUrl} />
+      <CtaBanner downloadUrl={downloadUrl} />
       <Footer />
     </main>
   );

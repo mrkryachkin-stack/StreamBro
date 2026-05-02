@@ -1,7 +1,25 @@
+"use client";
+
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
 
+const FALLBACK_VERSION = "1.2.2";
+
 export default function DownloadPage() {
+  const [version, setVersion] = useState(FALLBACK_VERSION);
+  const [downloadUrl, setDownloadUrl] = useState(`/api/download/portable/StreamBro-${FALLBACK_VERSION}-portable.zip`);
+
+  useEffect(() => {
+    fetch("/api/download/latest")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.version) setVersion(d.version);
+        if (d.url) setDownloadUrl(d.url);
+      })
+      .catch(() => {});
+  }, []);
+
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg-0)" }}>
       {/* Header */}
@@ -66,7 +84,7 @@ export default function DownloadPage() {
 
           {/* Download button */}
           <a
-            href="/api/download/portable/StreamBro-1.2.1-portable.zip"
+            href={downloadUrl}
             className="btn-gold"
             style={{ fontSize: "1.2rem", padding: "1.25rem 3.5rem", display: "inline-block", marginBottom: "2rem" }}
           >
@@ -87,7 +105,7 @@ export default function DownloadPage() {
             <h3 style={{ fontSize: "1.05rem", fontWeight: 700, marginBottom: "1.25rem" }}>Информация</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
               {[
-                ["Версия", "1.2.1"],
+                ["Версия", version],
                 ["Платформа", "Windows 10/11 x64"],
                 ["Размер", "~209 МБ"],
                 ["Формат", "Portable (.zip) — без установки"],

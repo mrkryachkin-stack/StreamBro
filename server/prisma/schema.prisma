@@ -1,0 +1,261 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  username      String    @unique
+  passwordHash  String?
+  displayName   String?
+  avatarUrl     String?
+  bio           String?
+  status        String    @default("online")
+  role          Role      @default(USER)
+  emailVerified Boolean   @default(false)
+  verifyToken   String?
+  resetToken    String?
+  resetTokenExp DateTime?
+  lastLoginAt   DateTime?
+  banned        Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  subscription   Subscription?
+  downloads      Download[]
+  settingsBlob   SettingsBlob?
+  streamEvents   StreamEvent[]
+  sentMessages   Message[]  @relation("SentMessages")
+  receivedMessages Message[] @relation("ReceivedMessages")
+  createdRooms   Room[]     @relation("RoomCreator")
+  roomMemberships RoomMember[]
+  friendRequests  Friendship[] @relation("FriendRequests")
+  friendAddresses Friendship[] @relation("FriendAddresses")
+  accounts        Account[]
+
+  @@map("users")
+}
+
+// ─── OAuth Accounts (Google, VK, etc.) ──────────────────────
+
+model Account {
+  id           String   @id @default(uuid())
+  userId       String
+  provider     String   // "google", "vk", etc.
+  providerId   String   // user ID from the OAuth provider
+  accessToken  String?  @db.Text
+  refreshToken String?  @db.Text
+  scope        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model Subscription {
+  id              String        @id @default(uuid())
+  userId          String        @unique
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan            Plan          @default(FREE)
+  status          SubStatus     @default(ACTIVE)
+  yookassaId      String?
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelAtEnd     Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("subscriptions")
+}
+
+enum Plan {
+  FREE
+  PRO
+  ULTIMATE
+}
+
+enum SubStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  EXPIRED
+}
+
+model Download {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  version    String
+  platform   String   @default("win-x64")
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@map("downloads")
+}
+
+model TurnCredential {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("turn_credentials")
+}
+
+// ─── Friends (bidirectional) ──────────────────────────────────
+
+model Friendship {
+  id          String          @id @default(uuid())
+  requesterId String
+  addresseeId String
+  status      FriendStatus    @default(PENDING)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  requester   User            @relation("FriendRequests", fields: [requesterId], references: [id], onDelete: Cascade)
+  addressee   User            @relation("FriendAddresses", fields: [addresseeId], references: [id], onDelete: Cascade)
+
+  @@unique([requesterId, addresseeId])
+  @@index([addresseeId, status])
+  @@index([requesterId, status])
+  @@map("friendships")
+}
+
+enum FriendStatus {
+  PENDING
+  ACCEPTED
+  BLOCKED
+}
+
+// ─── Chat Messages ──────────────────────────────────────────
+
+model Message {
+  id         String   @id @default(uuid())
+  senderId   String
+  receiverId String
+  content    String
+  read       Boolean  @default(false)
+  edited     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  sender     User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User     @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([senderId, createdAt])
+  @@index([receiverId, read, createdAt])
+  @@map("messages")
+}
+
+// ─── Co-stream Rooms ──────────────────────────────────────
+
+model Room {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  creatorId   String
+  name        String?
+  maxPeers    Int      @default(4)
+  status      RoomStatus @default(ACTIVE)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  creator     User          @relation("RoomCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  members     RoomMember[]
+
+  @@index([code])
+  @@index([creatorId, status])
+  @@map("rooms")
+}
+
+enum RoomStatus {
+  ACTIVE
+  CLOSED
+  EXPIRED
+}
+
+model RoomMember {
+  id         String   @id @default(uuid())
+  roomId     String
+  userId     String
+  role       RoomRole @default(MEMBER)
+  joinedAt   DateTime @default(now())
+  leftAt     DateTime?
+
+  room       Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@map("room_members")
+}
+
+enum RoomRole {
+  CREATOR
+  MEMBER
+}
+
+// ─── Stream Events (analytics) ──────────────────────────────
+
+model StreamEvent {
+  id          String   @id @default(uuid())
+  userId      String
+  platform    String
+  startedAt   DateTime @default(now())
+  endedAt     DateTime?
+  duration    Int?
+  reconnects  Int      @default(0)
+  peakViewers Int?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startedAt])
+  @@index([platform, startedAt])
+  @@map("stream_events")
+}
+
+// ─── Cloud Settings Sync ────────────────────────────────────
+
+model SettingsBlob {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  encryptedData String   @db.Text
+  iv            String
+  version       Int      @default(1)
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("settings_blobs")
+}
+
+// ─── Bug Reports (from desktop app) ────────────────────────
+
+model BugReport {
+  id          String   @id @default(uuid())
+  type        String   @default("unknown")
+  message     String?  @db.Text
+  stackTrace  String?  @db.Text
+  appVersion  String?
+  platform    String?  @default("win-x64")
+  profileId   String?
+  ip          String?
+  createdAt   DateTime @default(now())
+
+  @@index([type, createdAt])
+  @@index([appVersion])
+  @@map("bug_reports")
+}

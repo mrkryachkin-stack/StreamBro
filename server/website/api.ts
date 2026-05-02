@@ -1,22 +1,12 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://streambro.ru/api";
+const API_BASE = "/api";
 
 type FetchOptions = RequestInit & { noParse?: boolean };
 
-function getToken(): string | null {
-  if (typeof document === "undefined") return null;
-  const match = document.cookie.match(/(?:^|;\s*)token=([^;]*)/);
-  return match ? match[1] : null;
-}
-
 async function apiFetch<T = unknown>(path: string, options: FetchOptions = {}): Promise<T> {
   const { noParse, ...init } = options;
-  const token = getToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
@@ -53,4 +43,13 @@ export const api = {
       method: "PATCH",
       ...(body !== undefined && { body: JSON.stringify(body) }),
     }),
+
+  put: <T = unknown>(path: string, body?: unknown) =>
+    apiFetch<T>(path, {
+      method: "PUT",
+      ...(body !== undefined && { body: JSON.stringify(body) }),
+    }),
+
+  delete: <T = unknown>(path: string) =>
+    apiFetch<T>(path, { method: "DELETE" }),
 };

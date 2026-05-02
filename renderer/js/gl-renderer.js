@@ -37,7 +37,7 @@ const GLRenderer = {
       alpha: true,
       premultipliedAlpha: false,
       preserveDrawingBuffer: true,
-      antialias: false,
+      antialias: true,
       depth: false,
       stencil: true,
     });
@@ -214,9 +214,12 @@ const GLRenderer = {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   },
 
-  drawGlowOut(it, fs, glowColor, glowSize, opacity) {
+  drawGlowOut(it, fs, glowColor, glowSize, opacity, direction) {
     const gl = this.gl;
     if (!gl) return;
+
+    // direction: 0=outward, 1=inward, 2=both (default 0 for backward compat)
+    const dir = direction !== undefined ? direction : 0;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboA);
     gl.viewport(0, 0, this._fboW, this._fboH);
@@ -231,6 +234,7 @@ const GLRenderer = {
     gl.uniform2f(p.u.scale, it.w, it.h);
     gl.uniform4f(p.u.color, ...this._hexToGL(glowColor), opacity);
     gl.uniform1f(p.u.expand, glowSize);
+    gl.uniform1i(p.u.direction, dir);
 
     const maskType = it.cropMask || 'none';
     gl.uniform1i(p.u.maskMode, maskType === 'circle' ? 1 : maskType === 'rounded' ? 2 : 0);
@@ -239,8 +243,8 @@ const GLRenderer = {
     this._drawQuad(p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    const blurRadius = Math.max(2, glowSize * 0.8);
-    const blurredTex = this.blur(this._fboTexA, blurRadius, window.S && S.reducedMotion ? 2 : 4);
+    const blurRadius = Math.max(2, glowSize * 1.5);
+    const blurredTex = this.blur(this._fboTexA, blurRadius, window.S && S.reducedMotion ? 2 : 6);
 
     // Composite onto main canvas with additive blend
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -295,6 +299,7 @@ const GLRenderer = {
     gl.uniform2f(p.u.scale, it.w, it.h);
     gl.uniform4f(p.u.color, ...this._hexToGL(color), opacity);
     gl.uniform1f(p.u.expand, thickness);
+    gl.uniform1i(p.u.direction, 2); // both directions for border stroke edge line
 
     const maskType = it.cropMask || 'none';
     gl.uniform1i(p.u.maskMode, maskType === 'circle' ? 1 : maskType === 'rounded' ? 2 : 0);
@@ -576,24 +581,43 @@ uniform float u_expand;
 uniform int u_maskMode;
 uniform float u_maskRadius;
 uniform vec2 u_scale;
+uniform int u_direction; // 0=outward only, 1=inward only, 2=both
 out vec4 fragColor;
 void main() {
   vec2 pos = v_uv * 2.0 - 1.0;
+  // Signed distance: negative inside, positive outside, zero on edge
   float d;
   if (u_maskMode == 1) {
-    d = length(pos);
+    d = length(pos) - 1.0;
   } else if (u_maskMode == 2) {
     float r = u_maskRadius / max(abs(u_scale.x), abs(u_scale.y)) * 2.0;
     vec2 dd = abs(pos) - 1.0 + r;
     d = length(max(dd, 0.0)) + min(max(dd.x, dd.y), 0.0) - r;
-    d = max(d, 0.0);
   } else {
     vec2 dd = abs(pos) - 1.0;
-    d = length(max(dd, 0.0));
+    d = length(max(dd, 0.0)) + min(max(dd.x, dd.y), 0.0);
   }
-  float reach = u_expand / max(abs(u_scale.x), abs(u_scale.y)) * 2.0;
-  float alpha = 1.0 - smoothstep(0.0, max(reach, 0.01), d);
-  if (d < 0.001) alpha = 0.0;
+  // reach: normalize expand by average scale so glow is proportional to source size
+  float avgScale = (abs(u_scale.x) + abs(u_scale.y)) * 0.5;
+  float reach = u_expand / max(avgScale, 1.0) * 2.0;
+  float alpha = 0.0;
+  if (u_direction == 0) {
+    // Outward only: glow from edge outward
+    if (d >= 0.0) {
+      alpha = 1.0 - smoothstep(0.0, max(reach, 0.01), d);
+      alpha = pow(alpha, 0.6); // boost intensity near edge for stronger glow
+    }
+  } else if (u_direction == 1) {
+    // Inward only: glow from edge inward
+    if (d <= 0.0) {
+      alpha = 1.0 - smoothstep(0.0, max(reach, 0.01), -d);
+      alpha = pow(alpha, 0.7);
+    }
+  } else {
+    // Both: glow in both directions
+    alpha = 1.0 - smoothstep(0.0, max(reach, 0.01), abs(d));
+    alpha = pow(alpha, 0.6);
+  }
   fragColor = vec4(u_color.rgb, u_color.a * alpha);
 }`;
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { api } from "@/lib/api";
@@ -10,16 +10,27 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Redirect to dashboard if already logged in
+  useEffect(() => {
+    document.title = "StreamBro — Вход";
+    fetch("/api/user/test-cookie", { credentials: "include" })
+      .then((r) => r.json())
+      .then((d) => { if (d.hasCookie) window.location.href = "/dashboard"; })
+      .catch(() => {});
+  }, []);
+
+  // Check for OAuth error or verification status from URL params
+  const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const oauthError = params?.get("oauth_error");
+  const verifyStatus = params?.get("verify");
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
       const res = await api.post<{ user: { id: string; username: string }; token: string }>("/auth/login", form);
-      document.cookie = `token=${res.token}; path=/; max-age=${7 * 86400}; samesite=lax`;
-      // Check if there's a deep-link redirect (from desktop app)
-      const params = new URLSearchParams(window.location.search);
-      const redirect = params.get("redirect");
+      const redirect = params?.get("redirect");
       if (redirect === "app") {
         window.location.href = `streambro://login?token=${encodeURIComponent(res.token)}&username=${encodeURIComponent(res.user.username)}`;
       } else {
@@ -40,7 +51,7 @@ export default function LoginPage() {
         alignItems: "center",
         justifyContent: "center",
         padding: "2rem",
-        background: "var(--bg-0)",
+        background: "#0a0a12",
         position: "relative",
       }}
     >
@@ -53,7 +64,7 @@ export default function LoginPage() {
           transform: "translate(-50%, -50%)",
           width: 500,
           height: 500,
-          background: "radial-gradient(ellipse, var(--gold-dim) 0%, transparent 60%)",
+          background: "radial-gradient(ellipse, rgba(139,92,246,0.08) 0%, transparent 60%)",
           pointerEvents: "none",
         }}
       />
@@ -61,9 +72,9 @@ export default function LoginPage() {
       <div
         style={{
           position: "relative",
-          background: "var(--bg-2)",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius)",
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: 12,
           padding: "3rem 2.5rem",
           width: "100%",
           maxWidth: 420,
@@ -71,36 +82,78 @@ export default function LoginPage() {
       >
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: "2rem" }}>
           <Image src="/logo.png" alt="StreamBro" width={32} height={32} style={{ borderRadius: 8 }} />
-          <span style={{ fontWeight: 800, fontSize: "1.15rem" }}>StreamBro</span>
+          <span style={{ fontWeight: 800, fontSize: "1.15rem", color: "#fff" }}>StreamBro</span>
         </div>
 
-        <h1 style={{ fontSize: "1.5rem", fontWeight: 800, letterSpacing: "-0.02em", marginBottom: "0.5rem" }}>
-          Вход в аккаунт
+        <h1 style={{ fontSize: "1.5rem", fontWeight: 800, letterSpacing: "-0.02em", marginBottom: "0.5rem", color: "#fff" }}>
+          {"Вход в аккаунт"}
         </h1>
-        <p style={{ color: "var(--text-1)", marginBottom: "2rem", fontSize: "0.95rem" }}>
-          Добро пожаловать обратно
+        <p style={{ color: "#94a3b8", marginBottom: "2rem", fontSize: "0.95rem" }}>
+          {"Добро пожаловать обратно"}
         </p>
 
+        {/* Verification success message */}
+        {verifyStatus === "success" && (
+          <div style={{
+            background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)",
+            borderRadius: 8, padding: "0.75rem 1rem", marginBottom: "1.25rem", color: "#22c55e", fontSize: "0.9rem",
+          }}>{"Email подтверждён!"}</div>
+        )}
+
+        {/* OAuth error */}
+        {oauthError && (
+          <div style={{
+            background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)",
+            borderRadius: 8, padding: "0.75rem 1rem", marginBottom: "1.25rem", color: "#f87171", fontSize: "0.9rem",
+          }}>{"Ошибка входа через соцсеть"}</div>
+        )}
+
         {error && (
-          <div
+          <div style={{
+            background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)",
+            borderRadius: 8, padding: "0.75rem 1rem", marginBottom: "1.25rem", color: "#f87171", fontSize: "0.9rem",
+          }}>{error}</div>
+        )}
+
+        {/* OAuth buttons */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", marginBottom: "1.5rem" }}>
+          <a
+            href="/api/auth/google"
             style={{
-              background: "rgba(248, 113, 113, 0.08)",
-              border: "1px solid rgba(248, 113, 113, 0.2)",
-              borderRadius: "var(--radius-sm)",
-              padding: "0.75rem 1rem",
-              marginBottom: "1.25rem",
-              color: "var(--error)",
-              fontSize: "0.9rem",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: "0.75rem",
+              padding: "0.65rem 1rem", borderRadius: 8, fontSize: "0.9rem", fontWeight: 500,
+              background: "#fff", color: "#1f2937", textDecoration: "none",
+              border: "1px solid rgba(0,0,0,0.1)",
             }}
           >
-            {error}
-          </div>
-        )}
+            <svg width="18" height="18" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+            {"Войти через Google"}
+          </a>
+          <a
+            href="/api/auth/vk"
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center", gap: "0.75rem",
+              padding: "0.65rem 1rem", borderRadius: 8, fontSize: "0.9rem", fontWeight: 500,
+              background: "#0077FF", color: "#fff", textDecoration: "none",
+              border: "1px solid rgba(0,119,255,0.3)",
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M15.684 0H8.316C1.592 0 0 1.592 0 8.316v7.368C0 22.408 1.592 24 8.316 24h7.368C22.408 24 24 22.408 24 15.684V8.316C24 1.592 22.391 0 15.684 0zm3.692 17.123h-1.744c-.66 0-.862-.525-2.05-1.727-1.033-1-1.49-1.135-1.744-1.135-.356 0-.458.102-.458.593v1.575c0 .424-.135.678-1.253.678-1.846 0-3.896-1.12-5.335-3.202C4.624 10.857 4.03 8.57 4.03 8.096c0-.254.102-.491.593-.491h1.744c.44 0 .61.203.779.677.863 2.49 2.303 4.675 2.896 4.675.22 0 .322-.102.322-.66V9.721c-.068-1.186-.695-1.287-.695-1.71 0-.203.17-.407.44-.407h2.744c.373 0 .508.203.508.643v3.473c0 .372.17.508.271.508.22 0 .407-.136.813-.542 1.27-1.422 2.18-3.606 2.18-3.606.119-.254.322-.491.762-.491h1.744c.525 0 .643.27.525.643-.22 1.017-2.354 4.031-2.354 4.031-.186.305-.254.44 0 .779.186.254.796.779 1.203 1.253.745.847 1.32 1.558 1.473 2.05.17.49-.085.744-.576.744z"/></svg>
+            {"Войти через VK"}
+          </a>
+        </div>
+
+        {/* Divider */}
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginBottom: "1.5rem" }}>
+          <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.06)" }} />
+          <span style={{ color: "#6b7280", fontSize: "0.8rem" }}>{"или"}</span>
+          <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.06)" }} />
+        </div>
 
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: "1.25rem" }}>
-            <label style={{ display: "block", marginBottom: "0.5rem", fontSize: "0.85rem", fontWeight: 600, color: "var(--text-1)" }}>
-              Email или имя пользователя
+            <label style={{ display: "block", marginBottom: "0.5rem", fontSize: "0.85rem", fontWeight: 600, color: "#c4b5fd" }}>
+              {"Email или имя пользователя"}
             </label>
             <input
               type="text"
@@ -113,15 +166,15 @@ export default function LoginPage() {
           </div>
 
           <div style={{ marginBottom: "2rem" }}>
-            <label style={{ display: "block", marginBottom: "0.5rem", fontSize: "0.85rem", fontWeight: 600, color: "var(--text-1)" }}>
-              Пароль
+            <label style={{ display: "block", marginBottom: "0.5rem", fontSize: "0.85rem", fontWeight: 600, color: "#c4b5fd" }}>
+              {"Пароль"}
             </label>
             <input
               type="password"
               className="input"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
-              placeholder="Введите пароль"
+              placeholder={"Введите пароль"}
               required
             />
           </div>
@@ -130,18 +183,21 @@ export default function LoginPage() {
             type="submit"
             className="btn-gold"
             disabled={loading}
-            style={{ width: "100%", opacity: loading ? 0.6 : 1 }}
+            style={{ width: "100%", opacity: loading ? 0.6 : 1,
+              background: "rgba(139,92,246,0.2)", color: "#c4b5fd", border: "1px solid rgba(139,92,246,0.3)" }}
           >
             {loading ? "Вход..." : "Войти"}
           </button>
         </form>
 
-        <p style={{ textAlign: "center", marginTop: "2rem", color: "var(--text-2)", fontSize: "0.9rem" }}>
-          Нет аккаунта?{" "}
-          <Link href="/register" style={{ color: "var(--gold)", fontWeight: 600 }}>
-            Регистрация
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: "1.5rem" }}>
+          <Link href="/reset-password" style={{ color: "#94a3b8", fontSize: "0.85rem", textDecoration: "none" }}>
+            {"Забыли пароль?"}
           </Link>
-        </p>
+          <Link href="/register" style={{ color: "#c4b5fd", fontWeight: 600, fontSize: "0.85rem", textDecoration: "none" }}>
+            {"Регистрация"}
+          </Link>
+        </div>
       </div>
     </div>
   );

@@ -1,0 +1,8 @@
+name = "streambro-mail"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+FROM_EMAIL = "noreply@streambro.ru"
+
+# Set MAIL_SECRET via: wrangler secret put MAIL_SECRET

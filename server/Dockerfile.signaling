@@ -1,0 +1,12 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package.json ./
+RUN npm install ws
+
+COPY signaling-server ./signaling-server
+
+EXPOSE 7890
+
+CMD ["node", "signaling-server/server.js"]

@@ -18,6 +18,7 @@
   let _unread = {};
   let _expanded = null; // friendId currently shown chat for
   let _myProfile = null;
+  let _chatMessages = {}; // friendId → messages[] cache
 
   function _escape(s) {
     return String(s || '').replace(/[&<>"']/g, c => ({
@@ -34,8 +35,10 @@
     el.innerHTML = `
       <div class="self-status-row">
         <div class="self-avatar">${_myProfile.avatar
-          ? `<img src="${_escape(_myProfile.avatar)}" alt=""/>`
-          : _initials(_myProfile.nickname)}</div>
+          ? (_myProfile.avatar.startsWith('http') || _myProfile.avatar.startsWith('/') || _myProfile.avatar.startsWith('avatar:')
+            ? `<img src="${_escape(_myProfile.avatar)}" alt=""/>`
+            : _escape(_myProfile.avatar))
+          : `<span class="avatar-initials">${_initials(_myProfile.nickname)}</span>`}</div>
         <div class="self-meta">
           <div class="self-nick">${_escape(_myProfile.nickname || 'Я')}</div>
           <select class="self-status-select" id="friendsSelfStatusSelect">
@@ -69,7 +72,10 @@
         <div class="friend-item ${isExpanded ? 'expanded' : ''}" data-fid="${_escape(f.id)}">
           <div class="friend-row" data-action="toggle">
             <div class="friend-avatar">
-              ${f.avatar ? `<img src="${_escape(f.avatar)}" alt=""/>` : _initials(f.nickname)}
+              ${f.avatar ? (f.avatar.startsWith('http') || f.avatar.startsWith('/') || f.avatar.startsWith('avatar:')
+                ? `<img src="${_escape(f.avatar)}" alt=""/>`
+                : _escape(f.avatar))
+                : `<span class="avatar-initials">${_initials(f.nickname)}</span>`}
               <span class="friend-status-dot status-${_escape(f.status || 'offline')}" title="${_escape(STATUS_LABELS[f.status] || 'Offline')}"></span>
             </div>
             <div class="friend-meta">
@@ -119,23 +125,27 @@
     _toggling = true;
     try {
       _renderList();               // build DOM with display:block on expanded chat
-      await _renderChat(friendId); // fill chat content
+      await _loadAndRenderChat(friendId); // fill chat content
       await window.electronAPI.friendsMarkRead(friendId);
       _unread = await window.electronAPI.friendsUnread();
       _updateBadge();
-      // Don't call _renderList() again — it would destroy the chat DOM.
-      // Just update the unread counters in-place.
     } finally { _toggling = false; }
   }
 
-  async function _renderChat(friendId) {
+  async function _loadAndRenderChat(friendId) {
     const el = document.getElementById('chat-' + friendId);
     if (!el) return;
     const messages = await window.electronAPI.friendsChat(friendId);
+    _chatMessages[friendId] = messages || [];
+    _renderChatDOM(friendId, el, _chatMessages[friendId]);
+  }
+
+  function _renderChatDOM(friendId, el, messages) {
+    const myUserId = (_myProfile && _myProfile.id) || null;
     el.innerHTML = `
       <div class="chat-messages" id="chatMsgs-${_escape(friendId)}">
         ${messages.length
-          ? messages.map(_renderMsg).join('')
+          ? messages.map(m => _renderMsg(m, myUserId)).join('')
           : '<div class="chat-empty">Нет сообщений. Напишите первым — удобно отправить код комнаты.</div>'}
       </div>
       <form class="chat-input-row" id="chatForm-${_escape(friendId)}">
@@ -143,11 +153,11 @@
         <button type="submit" class="btn-icon" title="Отправить">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
-      </form>
-    `;
+      </form>`;
     const msgsEl = document.getElementById('chatMsgs-' + friendId);
     if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
 
+    // Wire form submit
     const form = document.getElementById('chatForm-' + friendId);
     const input = document.getElementById('chatInput-' + friendId);
     form && form.addEventListener('submit', async (e) => {
@@ -155,19 +165,115 @@
       const text = (input && input.value || '').trim();
       if (!text) return;
       input.value = '';
-      const r = await window.electronAPI.friendsSendMessage(friendId, text);
-      if (r && r.success) {
-        try { window.SBSounds && window.SBSounds.play('success'); } catch (er) {}
-        await _renderChat(friendId);
+      input.disabled = true;
+      try {
+        const r = await window.electronAPI.friendsSendMessage(friendId, text);
+        if (r && r.success) {
+          try { window.SBSounds && window.SBSounds.play('success'); } catch (er) {}
+          // Append message to cache instead of full reload
+          const newMsg = { id: r.id, from: 'me', text, ts: Date.now(), senderId: myUserId };
+          _chatMessages[friendId] = _chatMessages[friendId] || [];
+          _chatMessages[friendId].push(newMsg);
+          _appendMessageToDOM(friendId, newMsg, myUserId);
+        } else {
+          // Fallback: full reload
+          await _loadAndRenderChat(friendId);
+        }
+      } finally {
+        input.disabled = false;
+        input.focus();
       }
     });
+
+    // Wire context menu on messages (edit/delete for own messages)
+    const msgsContainer = document.getElementById('chatMsgs-' + friendId);
+    if (msgsContainer) {
+      msgsContainer.addEventListener('contextmenu', (e) => {
+        const msgEl = e.target.closest('.chat-msg');
+        if (!msgEl) return;
+        const msgId = msgEl.dataset.msgId;
+        const isOwn = msgEl.dataset.fromMe === '1';
+        if (!isOwn || !msgId) return;
+
+        e.preventDefault();
+        _showMsgContextMenu(e, msgId, friendId, msgEl);
+      });
+    }
+
     input && input.focus();
   }
 
-  function _renderMsg(m) {
-    const time = new Date(m.ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-    const klass = m.from === 'me' ? 'chat-msg me' : 'chat-msg them';
-    return `<div class="${klass}"><span class="chat-msg-text">${_escape(m.text)}</span><span class="chat-msg-time">${time}</span></div>`;
+  function _showMsgContextMenu(e, msgId, friendId, msgEl) {
+    // Remove any existing context menu
+    const existing = document.querySelector('.chat-ctx-menu');
+    if (existing) existing.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'chat-ctx-menu';
+    menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;background:#1e1e2e;border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px 0;z-index:10000;min-width:120px;box-shadow:0 4px 16px rgba(0,0,0,0.5);`;
+
+    const editBtn = document.createElement('div');
+    editBtn.textContent = 'Редактировать';
+    editBtn.style.cssText = 'padding:6px 14px;cursor:pointer;font-size:0.85rem;color:#e2e8f0;';
+    editBtn.addEventListener('click', async () => {
+      menu.remove();
+      const newText = prompt('Редактировать сообщение:', msgEl.querySelector('.chat-msg-text')?.textContent || '');
+      if (!newText || !newText.trim()) return;
+      const r = await window.electronAPI.chatEdit(msgId, newText.trim());
+      if (r && r.ok) {
+        await _loadAndRenderChat(friendId);
+      } else {
+        if (window.msg) window.msg(r?.error || 'Ошибка редактирования');
+      }
+    });
+
+    const deleteBtn = document.createElement('div');
+    deleteBtn.textContent = 'Удалить';
+    deleteBtn.style.cssText = 'padding:6px 14px;cursor:pointer;font-size:0.85rem;color:#f87171;';
+    deleteBtn.addEventListener('click', async () => {
+      menu.remove();
+      if (!confirm('Удалить сообщение?')) return;
+      const r = await window.electronAPI.chatDelete(msgId);
+      if (r && r.ok) {
+        msgEl.remove();
+        _chatMessages[friendId] = (_chatMessages[friendId] || []).filter(m => m.id !== msgId);
+      } else {
+        if (window.msg) window.msg(r?.error || 'Ошибка удаления');
+      }
+    });
+
+    menu.appendChild(editBtn);
+    menu.appendChild(deleteBtn);
+    document.body.appendChild(menu);
+
+    // Close on click outside
+    const closeHandler = (ev) => {
+      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', closeHandler); }
+    };
+    setTimeout(() => document.addEventListener('click', closeHandler), 10);
+  }
+
+  function _appendMessageToDOM(friendId, msg, myUserId) {
+    const msgsEl = document.getElementById('chatMsgs-' + friendId);
+    if (!msgsEl) return;
+    const div = document.createElement('div');
+    div.innerHTML = _renderMsg(msg, myUserId);
+    const child = div.firstElementChild;
+    if (child) {
+      msgsEl.appendChild(child);
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+  }
+
+  function _renderMsg(m, myUserId) {
+    const time = new Date(m.ts || m.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const isMe = m.from === 'me' || m.senderId === myUserId;
+    const klass = isMe ? 'chat-msg me' : 'chat-msg them';
+    const isEdited = m.edited || false;
+    const msgId = m.id || '';
+    const fromMeAttr = isMe ? 'data-from-me="1"' : '';
+    const msgIdAttr = msgId ? `data-msg-id="${_escape(msgId)}"` : '';
+    return `<div class="${klass}" ${fromMeAttr} ${msgIdAttr}><span class="chat-msg-text">${_escape(m.text || m.content)}</span>${isEdited ? '<span class="chat-msg-edited" style="font-size:0.65rem;color:#6b7280;margin-left:4px;">ред.</span>' : ''}<span class="chat-msg-time">${time}</span></div>`;
   }
 
   // ─── Add friend modal ───
@@ -186,14 +292,27 @@
 
     sendBtn && sendBtn.addEventListener('click', async () => {
       const code = (codeInp && codeInp.value || '').trim();
-      if (code.length < 4) { try { window.SBSounds.play('error'); } catch (e) {} return; }
-      const r = await window.electronAPI.friendsAdd({ code, message: (msgInp && msgInp.value) || '' });
-      if (r && r.success) {
-        try { window.SBSounds.play('notification'); } catch (e) {}
-        if (modal) modal.style.display = 'none';
-        if (codeInp) codeInp.value = '';
-        if (msgInp) msgInp.value = '';
-        alert('Заявка отправлена. Когда сервер подключим — друг получит её и подтвердит.');
+      if (code.length < 2) { try { window.SBSounds.play('error'); } catch (e) {} return; }
+      try {
+        const r = await window.electronAPI.friendsAdd({ code, message: (msgInp && msgInp.value) || '' });
+        if (r && r.success) {
+          try { window.SBSounds.play('notification'); } catch (e) {}
+          if (modal) modal.style.display = 'none';
+          if (codeInp) codeInp.value = '';
+          if (msgInp) msgInp.value = '';
+          if (r.offline) {
+            if (window.msg) window.msg('Заявка сохранена локально');
+          } else {
+            if (window.msg) window.msg('Заявка отправлена!');
+          }
+        } else {
+          const errText = (r && r.error) || 'Не удалось отправить заявку';
+          if (window.msg) window.msg(errText);
+          else alert(errText);
+        }
+      } catch (err) {
+        if (window.__sbDev) console.warn('[Friends] add error:', err);
+        if (window.msg) window.msg('Ошибка: ' + (err.message || err));
       }
     });
 
@@ -221,7 +340,7 @@
     // Re-render expanded chat if one is open
     if (_expanded) {
       // Small delay so _renderList's DOM is painted first
-      setTimeout(() => _renderChat(_expanded), 10);
+      setTimeout(() => _loadAndRenderChat(_expanded), 10);
     }
     _updateBadge();
   }
@@ -258,15 +377,22 @@
         if (data && data.msg && data.msg.from !== 'me') {
           try { window.SBSounds.play('message'); } catch (e) {}
         }
-        // Just update unread + re-render the relevant chat — don't rebuild the whole list
+        // Update unread + re-render the relevant chat
         _unread = await window.electronAPI.friendsUnread();
         _updateBadge();
         if (data && data.friendId) {
-          // Update the unread dot on the friend row
-          const row = document.querySelector(`.friend-item[data-fid="${data.friendId}"] .mail-pulse`);
-          // We'll let the next full refresh handle the full badge update
           if (data.friendId === _expanded) {
-            await _renderChat(data.friendId);
+            // Append new message instead of full reload
+            const msg = data.msg || data;
+            const myUserId = (_myProfile && _myProfile.id) || null;
+            const isMe = msg.from === 'me' || msg.senderId === myUserId;
+            if (!isMe) {
+              _chatMessages[data.friendId] = _chatMessages[data.friendId] || [];
+              _chatMessages[data.friendId].push(msg);
+              _appendMessageToDOM(data.friendId, msg, myUserId);
+              // Mark as read immediately
+              await window.electronAPI.friendsMarkRead(data.friendId);
+            }
           }
         }
       });

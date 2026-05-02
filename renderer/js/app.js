@@ -472,7 +472,7 @@ async function _undoRestoreSource(r){
     msg('Не удалось восстановить источник: '+e.message,'info');
   }
 }
-function _snapCircle(it){if(it.cropMask==='circle'){const s=Math.min(it.w,it.h);it.w=s;it.h=s;_enforceCircle(it);}}
+function _snapCircle(it){if(it.cropMask==='circle'||it.cropMask==='rect'){const s=Math.min(it.w,it.h);it.w=s;it.h=s;_enforceCircle(it);}}
 function hitHandle(mx,my,it){const loc=worldToLocal(it,mx,my);for(const h of localHandles(it)){if(Math.hypot(loc.x-h.x,loc.y-h.y)<HIT_R)return h.id;}return null;}
 function hitItem(mx,my,it){const loc=worldToLocal(it,mx,my);return Math.abs(loc.x)<=it.w/2+6&&Math.abs(loc.y)<=it.h/2+6;}
 function cursorFor(hid){if(hid==='tl'||hid==='tr'||hid==='bl'||hid==='br')return'grab';const m={tm:'ns-resize',bm:'ns-resize',ml:'ew-resize',mr:'ew-resize',rot:'ew-resize'};return m[hid]||'default';}
@@ -498,6 +498,7 @@ async function init(){
     connectedPeersCreate:1,connectedPeersJoin:1,
     addSourceModal:1,btnCloseSourceModal:1,
     addMicModal:1,btnCloseMicModal:1,micSelect:1,btnConfirmMic:1,
+    renameModal:1,btnCloseRenameModal:1,renameInput:1,btnConfirmRename:1,
     deviceSelector:1,deviceSelectorLabel:1,deviceSelect:1,
     btnConfirmSource:1,notifications:1,
     btnOpenSettings:1,settingsModal:1,btnCloseSettingsModal:1,
@@ -532,6 +533,7 @@ async function init(){
   }
   if (!S._useGL) {
     S.ctx = D.sceneCanvas.getContext('2d');
+    if(S.ctx){S.ctx.imageSmoothingEnabled=true;S.ctx.imageSmoothingQuality='high';}
     if (window.__sbDev) console.log('[Init] Using Canvas 2D renderer');
   }
   // Overlay canvas for UI (handles, grid, safe-areas) — always 2D
@@ -547,6 +549,10 @@ async function init(){
   try{window.electronAPI.onFFmpegRecStopped(data=>{
     if(window.__sbDev) console.log('[Rec] FFmpeg finished:',data);
     if(S.rtmp&&S.rtmp.onRecStop) S.rtmp.onRecStop(data.path||'Видео/StreamBro_...mp4');
+  });}catch(e){}
+  // Listen for Presence WS signal relay (WebRTC)
+  try{window.electronAPI.onPresenceSignal(data=>{
+    if(S.wrtc&&S.wrtc.handlePresenceSignal) S.wrtc.handlePresenceSignal(data);
   });}catch(e){}
   // Show permanent desktop audio fader
   _showDesktopAudioFader();
@@ -961,13 +967,13 @@ function _initHints(){
 
 function initRTMP(){
   S.rtmp=new RTMPOutput();S.rtmp.setCanvas(D.sceneCanvas);
-  S.rtmp.onStart=()=>{S.streaming=true;D.btnStartStream.classList.add('streaming');D.btnStartStream.innerHTML='<span class="stream-dot"></span> Подключение...';D.btnPauseStream.disabled=false;D.btnStopStream.disabled=false;msg('Подключение к серверу...','info');};
-  S.rtmp.onStop=()=>{S.streaming=false;D.btnStartStream.classList.remove('streaming');D.btnStartStream.innerHTML='<span class="stream-dot"></span> Стрим';D.btnPauseStream.disabled=true;D.btnStopStream.disabled=true;D.btnPauseStream.textContent='Пауза';D.streamUptime.textContent='00:00:00';msg('Стрим остановлен','info');_setStreamStatus('offline');};
+  S.rtmp.onStart=()=>{S.streaming=true;D.btnStartStream.classList.add('streaming');D.btnStartStream.innerHTML='<span class="stream-dot"></span> Подключение...';D.btnPauseStream.disabled=false;D.btnStopStream.disabled=false;msg('Подключение к серверу...','info');_muteAppSounds();};
+  S.rtmp.onStop=()=>{S.streaming=false;D.btnStartStream.classList.remove('streaming');D.btnStartStream.innerHTML='<span class="stream-dot"></span> Стрим';D.btnPauseStream.disabled=true;D.btnStopStream.disabled=true;D.btnPauseStream.textContent='Пауза';D.streamUptime.textContent='00:00:00';msg('Стрим остановлен','info');_setStreamStatus('offline');_unmuteAppSounds();};
   S.rtmp.onPause=()=>{D.btnPauseStream.textContent='Продолжить';msg('Стрим на паузе','info');};
   S.rtmp.onResume=()=>{D.btnPauseStream.textContent='Пауза';msg('Стрим продолжен','info');};
   S.rtmp.onError=m=>msg('Ошибка: '+m,'error');
   S.rtmp.onStatus=(state,reason)=>_setStreamStatus(state,reason);
-  S.rtmp.onRecStart=()=>{D.btnStartRec.classList.add('recording');D.btnStartRec.innerHTML='<span class="rec-dot"></span> REC';D.btnStartRec.disabled=true;D.btnPauseRec.disabled=false;D.btnStopRec.disabled=false;D.recTimer.classList.add('active');S._recTimerInterval=setInterval(()=>{if(S.rtmp)D.recTimer.textContent=S.rtmp.getRecTime();},200);msg('Локальная запись начата','success');};
+  S.rtmp.onRecStart=()=>{D.btnStartRec.classList.add('recording');D.btnStartRec.innerHTML='<span class="rec-dot"></span> REC';D.btnStartRec.disabled=true;D.btnPauseRec.disabled=false;D.btnStopRec.disabled=false;D.recTimer.classList.add('active');S._recTimerInterval=setInterval(()=>{if(S.rtmp)D.recTimer.textContent=S.rtmp.getRecTime();},200);msg('Локальная запись начата','success');_muteAppSounds();};
   S.rtmp.onRecStop=(p)=>{
     clearInterval(S._recTimerInterval);S._recTimerInterval=null;
     D.btnStartRec.classList.remove('recording');
@@ -976,6 +982,7 @@ function initRTMP(){
     D.btnPauseRec.disabled=true;D.btnPauseRec.textContent='Пауза';
     D.btnStopRec.disabled=true;
     D.recTimer.classList.remove('active');D.recTimer.textContent='00:00:00';
+    _unmuteAppSounds();
     if(p===null){
       msg('Сохранение записи...','info');
     }else{
@@ -1047,9 +1054,24 @@ function _coTickActiveEdit(){
 // ═══════════════════════════════════════════════════════════
 //  STREAM STATUS UI
 // ═══════════════════════════════════════════════════════════
+// Mute/unmute app sounds during stream/recording so they don't leak via WASAPI
+let _soundsMutedByStream=false;
+function _muteAppSounds(){
+  if(_soundsMutedByStream) return;
+  _soundsMutedByStream=true;
+  if(window.SBSounds) SBSounds.setEnabled(false);
+}
+function _unmuteAppSounds(){
+  if(!S.streaming && !(S.rtmp&&S.rtmp._recording)){
+    _soundsMutedByStream=false;
+    if(window.SBSounds && S.settings && S.settings.sound && S.settings.sound.enabled!==false){
+      SBSounds.setEnabled(true);
+    }
+  }
+}
+
 function _setStreamStatus(state,reason){
-  S.streamStatus=state;
-  if(!D.btnStartStream)return;
+  S.streamStatus=state;  if(!D.btnStartStream)return;
   const map={offline:'Стрим',connecting:'Подключение...',live:'Идёт стрим',reconnecting:'Переподключение...',error:'Ошибка'};
   const label=map[state]||state;
   // On error/offline, fully reset the stream-side UI so the user can press "Стрим" again.
@@ -1176,6 +1198,10 @@ function bind(){
   D.btnCloseMicModal.onclick=()=>hideM('addMic');
   D.btnConfirmMic.onclick=confirmAddMic;
   D.addMicModal.onclick=e=>{if(e.target===D.addMicModal)hideM('addMic');};
+  D.btnCloseRenameModal.onclick=()=>hideM('rename');
+  D.btnConfirmRename.onclick=_confirmRename;
+  D.renameModal.onclick=e=>{if(e.target===D.renameModal)hideM('rename');};
+  D.renameInput.onkeydown=e=>{if(e.key==='Enter')_confirmRename();if(e.key==='Escape')hideM('rename');};
   D.connectModal.onclick=e=>{if(e.target===D.connectModal)hideM('connect');};
   D.addSourceModal.onclick=e=>{if(e.target===D.addSourceModal)hideM('addSource');};
   document.onkeydown=e=>{
@@ -1189,7 +1215,7 @@ function bind(){
       if(!isField){_undo();e.preventDefault();return;}
     }
     if(e.key==='Escape'){
-      hideM('connect');hideM('addSource');hideM('addMic');hideM('settings');hideM('help');
+      hideM('connect');hideM('addSource');hideM('addMic');hideM('settings');hideM('help');hideM('rename');
       S.selItem=null;_closeContextMenu();
       const cm=document.getElementById('camModal');
       if(cm){if(S._camRAF){cancelAnimationFrame(S._camRAF[0]);cancelAnimationFrame(S._camRAF[1]);S._camRAF=null;}cm.remove();}
@@ -1216,7 +1242,16 @@ function bind(){
       S.showGrid=!S.showGrid;_scheduleSettingsSave();_markDirty();e.preventDefault();
     }
     if((code==='KeyM'||e.key==='m'||e.key==='M')&&!e.ctrlKey&&!e.metaKey){
-      if(sel){const s=S.srcs.find(x=>x.id===sel);if(s&&s.stream&&s.stream.getAudioTracks().length){s.muted=!s.muted;_updateGain(s);renderMixer();e.preventDefault();}}
+      // Toggle mute on all microphone sources (not desktop/system audio)
+      const mics=S.srcs.filter(x=>x.stream&&x.stream.getAudioTracks().length>0&&x.type!=='desktop');
+      if(mics.length){
+        // If any are unmuted, mute all; otherwise unmute all
+        const anyUnmuted=mics.some(x=>!x.muted);
+        mics.forEach(x=>{x.muted=anyUnmuted;_updateGain(x);_coSafe(co=>co.broadcastSourceUpdate(x));});
+        renderMixer();_scheduleSettingsSave();
+        msg(anyUnmuted?'Все микрофоны выключены':'Все микрофоны включены',anyUnmuted?'info':'ok');
+        e.preventDefault();
+      }
     }
     if(e.key==='F11'){
       // toggle fullscreen of app window — let Electron handle via menu, ignore here
@@ -1234,6 +1269,7 @@ function bind(){
       else if(b.dataset.a==='tog')togVis(sid);
       else if(b.dataset.a==='lock')togLock(sid);
       else if(b.dataset.a==='cam')_showCamSettingsModal(sid);
+      else if(b.dataset.a==='rename')_showRenameModal(sid);
       return;
     }
     if(it)selSrc(it.dataset.sid);
@@ -1342,8 +1378,8 @@ function setupScene(){
   };
   cv.onmouseup=endI;
   document.addEventListener('mouseup',e=>{if(S.drag||S.res||S.rot||S.rotC||S.crop)endI();});
-  document.addEventListener('mousemove',e=>{if(!S.drag&&!S.res&&!S.rot&&!S.rotC&&!S.crop)return;const{x:mx,y:my}=toCanvas(cv,e);const cw=S.cw,ch=S.ch;if(S.drag){const it=S.items.find(s=>s.sid===S.drag.sid);if(!it)return;if(S.drag.panCrop){const rmI=rotMat(-it.rot);const ddx=mx-S.drag.startMx,ddy=my-S.drag.startMy;const lx=rmI.a*ddx+rmI.c*ddy,ly=rmI.b*ddx+rmI.d*ddy;let px=S.drag.startPanDx+lx,py=S.drag.startPanDy+ly;const cr=it.crop||{l:0,t:0,r:0,b:0};const isCircle=it.cropMask==='circle';      if(isCircle){
-        // For circle mask we use COVER scaling × CIRCLE_PAN_ZOOM — gives wiggle room on BOTH axes
+  document.addEventListener('mousemove',e=>{if(!S.drag&&!S.res&&!S.rot&&!S.rotC&&!S.crop)return;const{x:mx,y:my}=toCanvas(cv,e);const cw=S.cw,ch=S.ch;if(S.drag){const it=S.items.find(s=>s.sid===S.drag.sid);if(!it)return;if(S.drag.panCrop){const rmI=rotMat(-it.rot);const ddx=mx-S.drag.startMx,ddy=my-S.drag.startMy;const lx=rmI.a*ddx+rmI.c*ddy,ly=rmI.b*ddx+rmI.d*ddy;let px=S.drag.startPanDx+lx,py=S.drag.startPanDy+ly;const cr=it.crop||{l:0,t:0,r:0,b:0};const hasMask=it.cropMask&&it.cropMask!=='none';if(hasMask){
+        // For masked sources we use COVER scaling × CIRCLE_PAN_ZOOM — gives wiggle room on BOTH axes
         const _src=S.srcs.find(s=>s.id===it.sid);
         const sw=Math.max(1,_src&&_src.el?(_src.el.videoWidth*(1-cr.l-cr.r)):it.w);
         const sh=Math.max(1,_src&&_src.el?(_src.el.videoHeight*(1-cr.t-cr.b)):it.h);
@@ -1353,7 +1389,7 @@ function setupScene(){
         const maxPy=Math.max(0,(dh-it.h)/2);
         px=Math.max(-maxPx,Math.min(maxPx,px));
         py=Math.max(-maxPy,Math.min(maxPy,py));
-      }else{const vw=1-cr.l-cr.r,vh=1-cr.t-cr.b;if(vw>0.01){const mxL=cr.l*it.w/vw,mxR=-cr.r*it.w/vw;px=Math.max(mxR,Math.min(mxL,px));}else px=0;if(vh>0.01){const myT=cr.t*it.h/vh,myB=-cr.b*it.h/vh;py=Math.max(myB,Math.min(myT,py));}else py=0;}it.panDx=px;it.panDy=py;return;}let ncx=mx-S.drag.dx,ncy=my-S.drag.dy;if(Math.abs(ncx-it.w/2)<SNAP)ncx=it.w/2;if(Math.abs(ncy-it.h/2)<SNAP)ncy=it.h/2;if(Math.abs(ncx+it.w/2-cw)<SNAP)ncx=cw-it.w/2;if(Math.abs(ncy+it.h/2-ch)<SNAP)ncy=ch-it.h/2;if(Math.abs(ncx-cw/2)<SNAP)ncx=cw/2;if(Math.abs(ncy-ch/2)<SNAP)ncy=ch/2;it.cx=ncx;it.cy=ncy;const cr=it.crop||{l:0,t:0,r:0,b:0};const rm=rotMat(it.rot);it.uncropCx=it.cx-rm.a*(cr.l-cr.r)*it.uncropW/2-rm.c*(cr.t-cr.b)*it.uncropH/2;it.uncropCy=it.cy-rm.b*(cr.l-cr.r)*it.uncropW/2-rm.d*(cr.t-cr.b)*it.uncropH/2;return;}if(S.rot){const it=S.items.find(s=>s.sid===S.rot.sid);if(!it)return;let ns=Math.hypot(mx-it.cx,my-it.cy)/S.rot.startDist;ns=Math.max(.02,Math.min(10,ns));if(ns<.06&&!S.rot._fp){S.rot._fp=true;it.flipH=!it.flipH;}if(ns>.12)S.rot._fp=false;it.w=S.rot.origW*ns;it.h=S.rot.origH*ns;if(it.cropMask==='circle'){const s=Math.max(it.w,it.h);it.w=s;it.h=s;}_enforceCircle(it);return;}if(S.rotC){const it=S.items.find(s=>s.sid===S.rotC.sid);if(!it)return;let newRot=S.rotC.origRot+(Math.atan2(my-it.cy,mx-it.cx)*180/Math.PI-S.rotC.startAngle);for(const s of[0,90,180,270,-90,-180,-270]){if(Math.abs(newRot-s)<5){newRot=s;break;}}it.rot=newRot;let r=Math.hypot(mx-it.cx,my-it.cy)/Math.max(1,S.rotC.startDist);let nw=Math.max(MIN_DIM,S.rotC.origW*r),nh=Math.max(MIN_DIM,S.rotC.origH*r);it.w=nw;it.h=nh;if(it.cropMask==='circle'){const s=Math.max(nw,nh);it.w=s;it.h=s;}_enforceCircle(it);return;}if(S.crop){const it=S.items.find(s=>s.sid===S.crop.sid);if(!it)return;const hid=S.crop.hid;const oc=S.crop.origCrop;const n={...oc};const rm0=rotMat(-it.rot);const dx0=mx-it.uncropCx,dy0=my-it.uncropCy;const mLoc={x:rm0.a*dx0+rm0.c*dy0,y:rm0.b*dx0+rm0.d*dy0};const sLoc=S.crop.startLocal;const dlx=mLoc.x-sLoc.x,dly=mLoc.y-sLoc.y;const bw=it.uncropW,bh=it.uncropH;if(hid==='tm'){n.t=Math.max(0,Math.min(.9,oc.t+dly/bh));}else if(hid==='bm'){n.b=Math.max(0,Math.min(.9,oc.b-dly/bh));}else if(hid==='ml'){n.l=Math.max(0,Math.min(.9,oc.l+dlx/bw));}else if(hid==='mr'){n.r=Math.max(0,Math.min(.9,oc.r-dlx/bw));}else if(hid==='tl'){const cf_l=Math.max(0,Math.min(.45,oc.l+dlx/bw));const cf_t=Math.max(0,Math.min(.45,oc.t+dly/bh));n.l=cf_l;n.r=cf_l;n.t=cf_t;n.b=cf_t;}else if(hid==='tr'){const cf_r=Math.max(0,Math.min(.45,oc.r-dlx/bw));const cf_t=Math.max(0,Math.min(.45,oc.t+dly/bh));n.l=cf_r;n.r=cf_r;n.t=cf_t;n.b=cf_t;}else if(hid==='bl'){const cf_l=Math.max(0,Math.min(.45,oc.l+dlx/bw));const cf_b=Math.max(0,Math.min(.45,oc.b-dly/bh));n.l=cf_l;n.r=cf_l;n.t=cf_b;n.b=cf_b;}else if(hid==='br'){const cf_r=Math.max(0,Math.min(.45,oc.r-dlx/bw));const cf_b=Math.max(0,Math.min(.45,oc.b-dly/bh));n.l=cf_r;n.r=cf_r;n.t=cf_b;n.b=cf_b;}it.crop=n;if(hid==='tl'||hid==='tr'||hid==='bl'||hid==='br'){const avg=(n.l+n.r+n.t+n.b)/4;if(Math.abs(n.l-avg)<0.03&&Math.abs(n.r-avg)<0.03&&Math.abs(n.t-avg)<0.03&&Math.abs(n.b-avg)<0.03){n.l=avg;n.r=avg;n.t=avg;n.b=avg;it.crop=n;}for(const preset of[0.25,0.33,0.5]){if(Math.abs(n.l-preset)<0.02){n.l=preset;n.r=preset;n.t=preset;n.b=preset;it.crop=n;break;}}}const visW=1-n.l-n.r,visH=1-n.t-n.b;it.w=it.uncropW*visW;it.h=it.uncropH*visH;const nlcx=(n.l-n.r)*it.uncropW/2;const nlcy=(n.t-n.b)*it.uncropH/2;const rm=rotMat(it.rot);it.cx=it.uncropCx+rm.a*nlcx+rm.c*nlcy;it.cy=it.uncropCy+rm.b*nlcx+rm.d*nlcy;return;}if(S.res){const it=S.items.find(s=>s.sid===S.res.sid);if(!it)return;const rm=rotMat(it.rot);const dwx=mx-S.res.anchorWorld.x,dwy=my-S.res.anchorWorld.y;let nw,nh;const natAR=it.cropMask==='circle'?1:(it.naturalAR||S.res.origAR);if(e.shiftKey){nh=Math.abs(rm.c*dwx+rm.d*dwy);nw=Math.abs(rm.a*dwx+rm.b*dwy);}else{const d=Math.hypot(rm.a*dwx+rm.b*dwy,rm.c*dwx+rm.d*dwy)/Math.max(1,Math.hypot(S.res.origW,S.res.origH))*2;nw=S.res.origW*d;nh=nw/natAR;}nw=Math.max(MIN_DIM,nw);nh=Math.max(MIN_DIM,nh);it.w=nw;it.h=nh;if(it.cropMask==='circle'){const s=Math.max(nw,nh);it.w=s;it.h=s;}_enforceCircle(it);const op=opposite(S.res.hid,it.w,it.h);it.cx=S.res.anchorWorld.x-(rm.a*op.x+rm.c*op.y);it.cy=S.res.anchorWorld.y-(rm.b*op.x+rm.d*op.y);return;}});
+      }else{const vw=1-cr.l-cr.r,vh=1-cr.t-cr.b;if(vw>0.01){const mxL=cr.l*it.w/vw,mxR=-cr.r*it.w/vw;px=Math.max(mxR,Math.min(mxL,px));}else px=0;if(vh>0.01){const myT=cr.t*it.h/vh,myB=-cr.b*it.h/vh;py=Math.max(myB,Math.min(myT,py));}else py=0;}it.panDx=px;it.panDy=py;return;}let ncx=mx-S.drag.dx,ncy=my-S.drag.dy;if(Math.abs(ncx-it.w/2)<SNAP)ncx=it.w/2;if(Math.abs(ncy-it.h/2)<SNAP)ncy=it.h/2;if(Math.abs(ncx+it.w/2-cw)<SNAP)ncx=cw-it.w/2;if(Math.abs(ncy+it.h/2-ch)<SNAP)ncy=ch-it.h/2;if(Math.abs(ncx-cw/2)<SNAP)ncx=cw/2;if(Math.abs(ncy-ch/2)<SNAP)ncy=ch/2;it.cx=ncx;it.cy=ncy;const rm=rotMat(it.rot);it.uncropCx=it.cx-rm.a*(cr.l-cr.r)*it.uncropW/2-rm.c*(cr.t-cr.b)*it.uncropH/2;it.uncropCy=it.cy-rm.b*(cr.l-cr.r)*it.uncropW/2-rm.d*(cr.t-cr.b)*it.uncropH/2;return;}if(S.rot){const it=S.items.find(s=>s.sid===S.rot.sid);if(!it)return;let ns=Math.hypot(mx-it.cx,my-it.cy)/S.rot.startDist;ns=Math.max(.02,Math.min(10,ns));if(ns<.06&&!S.rot._fp){S.rot._fp=true;it.flipH=!it.flipH;}if(ns>.12)S.rot._fp=false;it.w=S.rot.origW*ns;it.h=S.rot.origH*ns;if(it.cropMask==='circle'||it.cropMask==='rect'){const s=Math.max(it.w,it.h);it.w=s;it.h=s;}_enforceCircle(it);return;}if(S.rotC){const it=S.items.find(s=>s.sid===S.rotC.sid);if(!it)return;let newRot=S.rotC.origRot+(Math.atan2(my-it.cy,mx-it.cx)*180/Math.PI-S.rotC.startAngle);for(const s of[0,90,180,270,-90,-180,-270]){if(Math.abs(newRot-s)<5){newRot=s;break;}}it.rot=newRot;let r=Math.hypot(mx-it.cx,my-it.cy)/Math.max(1,S.rotC.startDist);let nw=Math.max(MIN_DIM,S.rotC.origW*r),nh=Math.max(MIN_DIM,S.rotC.origH*r);it.w=nw;it.h=nh;if(it.cropMask==='circle'||it.cropMask==='rect'){const s=Math.max(nw,nh);it.w=s;it.h=s;}_enforceCircle(it);return;}if(S.crop){const it=S.items.find(s=>s.sid===S.crop.sid);if(!it)return;const hid=S.crop.hid;const oc=S.crop.origCrop;const n={...oc};const rm0=rotMat(-it.rot);const dx0=mx-it.uncropCx,dy0=my-it.uncropCy;const mLoc={x:rm0.a*dx0+rm0.c*dy0,y:rm0.b*dx0+rm0.d*dy0};const sLoc=S.crop.startLocal;const dlx=mLoc.x-sLoc.x,dly=mLoc.y-sLoc.y;const bw=it.uncropW,bh=it.uncropH;if(hid==='tm'){n.t=Math.max(0,Math.min(.9,oc.t+dly/bh));}else if(hid==='bm'){n.b=Math.max(0,Math.min(.9,oc.b-dly/bh));}else if(hid==='ml'){n.l=Math.max(0,Math.min(.9,oc.l+dlx/bw));}else if(hid==='mr'){n.r=Math.max(0,Math.min(.9,oc.r-dlx/bw));}else if(hid==='tl'){const cf_l=Math.max(0,Math.min(.45,oc.l+dlx/bw));const cf_t=Math.max(0,Math.min(.45,oc.t+dly/bh));n.l=cf_l;n.r=cf_l;n.t=cf_t;n.b=cf_t;}else if(hid==='tr'){const cf_r=Math.max(0,Math.min(.45,oc.r-dlx/bw));const cf_t=Math.max(0,Math.min(.45,oc.t+dly/bh));n.l=cf_r;n.r=cf_r;n.t=cf_t;n.b=cf_t;}else if(hid==='bl'){const cf_l=Math.max(0,Math.min(.45,oc.l+dlx/bw));const cf_b=Math.max(0,Math.min(.45,oc.b-dly/bh));n.l=cf_l;n.r=cf_l;n.t=cf_b;n.b=cf_b;}else if(hid==='br'){const cf_r=Math.max(0,Math.min(.45,oc.r-dlx/bw));const cf_b=Math.max(0,Math.min(.45,oc.b-dly/bh));n.l=cf_r;n.r=cf_r;n.t=cf_b;n.b=cf_b;}it.crop=n;if(hid==='tl'||hid==='tr'||hid==='bl'||hid==='br'){const avg=(n.l+n.r+n.t+n.b)/4;if(Math.abs(n.l-avg)<0.015&&Math.abs(n.r-avg)<0.015&&Math.abs(n.t-avg)<0.015&&Math.abs(n.b-avg)<0.015){n.l=avg;n.r=avg;n.t=avg;n.b=avg;it.crop=n;}for(const preset of[0.25,0.33,0.5]){if(Math.abs(n.l-preset)<0.008){n.l=preset;n.r=preset;n.t=preset;n.b=preset;it.crop=n;break;}}}const visW=1-n.l-n.r,visH=1-n.t-n.b;it.w=it.uncropW*visW;it.h=it.uncropH*visH;const nlcx=(n.l-n.r)*it.uncropW/2;const nlcy=(n.t-n.b)*it.uncropH/2;const rm=rotMat(it.rot);it.cx=it.uncropCx+rm.a*nlcx+rm.c*nlcy;it.cy=it.uncropCy+rm.b*nlcx+rm.d*nlcy;return;}if(S.res){const it=S.items.find(s=>s.sid===S.res.sid);if(!it)return;const rm=rotMat(it.rot);const dwx=mx-S.res.anchorWorld.x,dwy=my-S.res.anchorWorld.y;let nw,nh;const natAR=(it.cropMask==='circle'||it.cropMask==='rect')?1:(it.naturalAR||S.res.origAR);if(e.shiftKey){nh=Math.abs(rm.c*dwx+rm.d*dwy);nw=Math.abs(rm.a*dwx+rm.b*dwy);}else{const d=Math.hypot(rm.a*dwx+rm.b*dwy,rm.c*dwx+rm.d*dwy)/Math.max(1,Math.hypot(S.res.origW,S.res.origH))*2;nw=S.res.origW*d;nh=nw/natAR;}nw=Math.max(MIN_DIM,nw);nh=Math.max(MIN_DIM,nh);it.w=nw;it.h=nh;if(it.cropMask==='circle'||it.cropMask==='rect'){const s=Math.max(nw,nh);it.w=s;it.h=s;}_enforceCircle(it);const op=opposite(S.res.hid,it.w,it.h);it.cx=S.res.anchorWorld.x-(rm.a*op.x+rm.c*op.y);it.cy=S.res.anchorWorld.y-(rm.b*op.x+rm.d*op.y);return;}});
   cv.onwheel=e=>{
     e.preventDefault();
     const delta=e.deltaY>0?0.9:1.1;
@@ -1448,7 +1484,7 @@ function _showContextMenu(cx,cy,it){
     else if(a==='maskNone') it.cropMask='none';
     else if(a==='maskCircle'){it.cropMask='circle';const sq=Math.min(it.w,it.h);it.w=sq;it.h=sq;_enforceCircle(it);}
     else if(a==='maskRounded') it.cropMask='rounded';
-    else if(a==='maskRect') it.cropMask='rect';
+    else if(a==='maskRect'){it.cropMask='rect';const sq=Math.min(it.w,it.h);it.w=sq;it.h=sq;_enforceCircle(it);}
     else if(a==='frameSettings'){_closeContextMenu();_showCamSettingsModal(it.sid,'design');return;}
     else if(a==='delete'){rmSrc(it.sid);_closeContextMenu();return;}
     // Broadcast the new state to peers
@@ -1554,7 +1590,7 @@ function render(){
     const pdx=it.panDx||0,pdy=it.panDy||0;
     const sw=Math.max(1,v.videoWidth*(1-cr.l-cr.r)),sh=Math.max(1,v.videoHeight*(1-cr.t-cr.b));
     try{
-      if(it.cropMask==='circle'){
+      if(it.cropMask==='circle'||it.cropMask==='rect'||it.cropMask==='rounded'){
         const cs=Math.max(it.w/sw,it.h/sh)*CIRCLE_PAN_ZOOM;
         const dw=sw*cs,dh=sh*cs;
         c.drawImage(v,sx-pdx*(sw/dw),sy-pdy*(sh/dh),sw,sh,-dw/2,-dh/2,dw,dh);
@@ -1598,11 +1634,26 @@ function _renderGL(cw, ch){
       else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;glowColor=_hslToHex(hsl.h,hsl.s,hsl.l);}
       else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;glowColor=_hslToHex(h2.h,90,55);}
       opacity=Math.max(0,Math.min(1,opacity));
-      gl.drawGlowOut(it, fs, glowColor, glowSize, opacity);
+      gl.drawGlowOut(it, fs, glowColor, glowSize, opacity, 0);
     }
 
     // Draw video source as textured quad
     gl.drawSource(src.id, v, it, cr);
+
+    // Draw inward glow (GPU blur — rendered after video so it overlays inside)
+    if(fs && fs.glow && fs.glow.enabled && fs.glow.inward){
+      const glowSize = Math.max(2, fs.glow.size || 15);
+      let glowColor = fs.glow.color || fs.color || '#ffd23c';
+      let opacity = fs.opacity || 1.0;
+      const animType = S.reducedMotion ? 'none' : (fs.animation || 'none');
+      const animI = fs.animIntensity !== undefined ? fs.animIntensity : 1.0;
+      const t = S.frameAnimTime || 0;
+      if(animType==='breathe') opacity = fs.opacity * (Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
+      else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;glowColor=_hslToHex(hsl.h,hsl.s,hsl.l);}
+      else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;glowColor=_hslToHex(h2.h,90,55);}
+      opacity=Math.max(0,Math.min(1,opacity));
+      gl.drawGlowOut(it, fs, glowColor, glowSize, opacity * 0.8, 1);
+    }
 
     // Draw vignette
     if(fs && fs.vignette && fs.vignette.enabled){
@@ -1623,8 +1674,8 @@ function _renderGL(cw, ch){
 
       const style = fs.style || 'solid';
       if(style === 'glow'){
-        // Glow style uses blur
-        gl.drawGlowOut(it, fs, color, thickness * 3, opacity * 0.5);
+        // Glow style uses blur — outward only for border style
+        gl.drawGlowOut(it, fs, color, thickness * 3, opacity * 0.5, 0);
       } else {
         gl.drawBorderStroke(it, color, thickness, opacity, style);
       }
@@ -1895,32 +1946,60 @@ function _drawBorder(c,it){
 
   // Inward glow — мягкая «дымка», переходящая в едва заметный rim, без резкого ореола.
   if(fs.glow&&fs.glow.enabled&&fs.glow.inward&&glowSize>0){
-    // 1) Радиальный градиент от прозрачного центра к ОЧЕНЬ мягкому краю.
-    c.save();
-    c.globalCompositeOperation='source-over';
-    const innerR=Math.max(1,Math.min(hw,hh)-glowSize*1.8);
-    const outerR=Math.max(innerR+1,Math.min(hw,hh)*1.02);
-    const innerGrd=c.createRadialGradient(0,0,innerR,0,0,outerR);
-    innerGrd.addColorStop(0.00,_hexToRGBA(glowColor,0));
-    innerGrd.addColorStop(0.45,_hexToRGBA(glowColor,opacity*0.06));
-    innerGrd.addColorStop(0.72,_hexToRGBA(glowColor,opacity*0.16));
-    innerGrd.addColorStop(0.90,_hexToRGBA(glowColor,opacity*0.32));
-    innerGrd.addColorStop(1.00,_hexToRGBA(glowColor,opacity*0.48));
-    c.fillStyle=innerGrd;
-    if(isRound){c.beginPath();c.arc(0,0,Math.min(hw,hh),0,Math.PI*2);c.fill();}
-    else if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);c.fill();}
-    else c.fillRect(-hw,-hh,it.w,it.h);
-    c.restore();
-    // 2) Мягкие blur-страйки внутрь — при reducedMotion пропускаем для скорости
-    if(!S.reducedMotion){
-    const layers=[
-      {blur:glowSize*1.4,alpha:0.10,lw:thickness*0.8},
-      {blur:glowSize*0.6,alpha:0.20,lw:thickness*0.5},
-    ];
-    for(const layer of layers){
-      c.save();c.shadowColor=glowColor;c.shadowBlur=layer.blur;c.strokeStyle=color;c.lineWidth=layer.lw;c.globalAlpha=opacity*layer.alpha;
-      strokeMask();c.shadowBlur=0;c.restore();
-    }
+    if(isRound){
+      // Circle: radial gradient works naturally
+      c.save();
+      c.globalCompositeOperation='source-over';
+      const innerR=Math.max(1,Math.min(hw,hh)-glowSize*1.8);
+      const outerR=Math.max(innerR+1,Math.min(hw,hh)*1.02);
+      const innerGrd=c.createRadialGradient(0,0,innerR,0,0,outerR);
+      innerGrd.addColorStop(0.00,_hexToRGBA(glowColor,0));
+      innerGrd.addColorStop(0.45,_hexToRGBA(glowColor,opacity*0.06));
+      innerGrd.addColorStop(0.72,_hexToRGBA(glowColor,opacity*0.16));
+      innerGrd.addColorStop(0.90,_hexToRGBA(glowColor,opacity*0.32));
+      innerGrd.addColorStop(1.00,_hexToRGBA(glowColor,opacity*0.48));
+      c.fillStyle=innerGrd;
+      c.beginPath();c.arc(0,0,Math.min(hw,hh),0,Math.PI*2);c.fill();
+      c.restore();
+    } else {
+      // Rect/rounded: inset box-shadow using 4 linear gradients from edges
+      // This creates a smooth, non-blocky inward glow that follows the rectangle shape.
+      c.save();
+      // Clip to the source shape so glow stays inside
+      if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);}
+      else{c.beginPath();c.rect(-hw,-hh,it.w,it.h);}
+      c.clip();
+      const gDist=Math.min(glowSize*1.8, Math.min(hw,hh)*0.8);
+      const gAlpha=opacity*0.45;
+      // Top edge gradient
+      const gT=c.createLinearGradient(0,-hh,0,-hh+gDist);
+      gT.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
+      gT.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
+      gT.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
+      gT.addColorStop(1,_hexToRGBA(glowColor,0));
+      c.fillStyle=gT;c.fillRect(-hw,-hh,it.w,gDist);
+      // Bottom edge gradient
+      const gB=c.createLinearGradient(0,hh,0,hh-gDist);
+      gB.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
+      gB.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
+      gB.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
+      gB.addColorStop(1,_hexToRGBA(glowColor,0));
+      c.fillStyle=gB;c.fillRect(-hw,hh-gDist,it.w,gDist);
+      // Left edge gradient
+      const gL=c.createLinearGradient(-hw,0,-hw+gDist,0);
+      gL.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
+      gL.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
+      gL.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
+      gL.addColorStop(1,_hexToRGBA(glowColor,0));
+      c.fillStyle=gL;c.fillRect(-hw,-hh,gDist,it.h);
+      // Right edge gradient
+      const gR=c.createLinearGradient(hw,0,hw-gDist,0);
+      gR.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
+      gR.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
+      gR.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
+      gR.addColorStop(1,_hexToRGBA(glowColor,0));
+      c.fillStyle=gR;c.fillRect(hw-gDist,-hh,gDist,it.h);
+      c.restore();
     }
   }
 
@@ -2016,6 +2095,7 @@ function showM(n){
   if(n==='connect')D.connectModal.style.display='flex';
   if(n==='addSource'){D.addSourceModal.style.display='flex';D.deviceSelector.style.display='none';curType=null;}
   if(n==='addMic'){D.addMicModal.style.display='flex';loadMicList();}
+  if(n==='rename')D.renameModal.style.display='flex';
   if(n==='settings'&&D.settingsModal){_populateSettingsModal();D.settingsModal.style.display='flex';}
   if(n==='help'&&D.helpModal){D.helpModal.style.display='flex';}
 }
@@ -2023,6 +2103,7 @@ function hideM(n){
   if(n==='connect')D.connectModal.style.display='none';
   if(n==='addSource')D.addSourceModal.style.display='none';
   if(n==='addMic')D.addMicModal.style.display='none';
+  if(n==='rename')D.renameModal.style.display='none';
   if(n==='settings'&&D.settingsModal)D.settingsModal.style.display='none';
   if(n==='help'&&D.helpModal)D.helpModal.style.display='none';
 }
@@ -2159,7 +2240,12 @@ async function loadD(k,l){
     }
   }catch(e){msg('Нет доступа к камере','error');}
 }
+let _confirmAddLock=false;
 async function confirmAdd(){
+  if(_confirmAddLock) return;
+  _confirmAddLock=true;
+  D.btnConfirmSource.disabled=true;
+  try{
   if(!curType)return;
   try{
     let st;
@@ -2174,7 +2260,7 @@ async function confirmAdd(){
       });
       if(alreadyAdded){msg('Эта камера уже добавлена','error');return;}
       st=await navigator.mediaDevices.getUserMedia({
-        video:{deviceId:{exact:d.deviceId},width:{ideal:1920},height:{ideal:1080}},
+        video:{deviceId:{exact:d.deviceId},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30,min:15}},
         audio:false
       });
       addVideoSource('camera',d.label||'Камера',st);
@@ -2192,6 +2278,7 @@ async function confirmAdd(){
     hideM('addSource');
     msg('Источник добавлен','success');
   }catch(e){msg('Ошибка доступа: '+(e.message||e),'error');}
+  }finally{_confirmAddLock=false;D.btnConfirmSource.disabled=false;}
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2244,7 +2331,12 @@ async function loadMicList(){
   }catch(e){curMicDevs=[];D.micSelect.innerHTML='<option value="-1">Нет доступа</option>';}
 }
 
+let _confirmMicLock=false;
 async function confirmAddMic(){
+  if(_confirmMicLock) return;
+  _confirmMicLock=true;
+  D.btnConfirmMic.disabled=true;
+  try{
   const i=parseInt(D.micSelect.value);if(i<0||!curMicDevs[i]){msg('Выберите микрофон','error');return;}
   const d=curMicDevs[i];
   // Guard: do not add the same microphone twice
@@ -2273,6 +2365,33 @@ async function confirmAddMic(){
     hideM('addMic');
     msg('Микрофон добавлен: '+l,'success');
   }catch(e){msg('Ошибка: '+(e.message||e),'error');}
+  }finally{_confirmMicLock=false;D.btnConfirmMic.disabled=false;}
+}
+
+let _renameSid=null;
+function _showRenameModal(sid){
+  const src=S.srcs.find(s=>s.id===sid);
+  if(!src) return;
+  _renameSid=sid;
+  D.renameInput.value=src.name;
+  showM('rename');
+  setTimeout(()=>{D.renameInput.focus();D.renameInput.select();},50);
+}
+function _confirmRename(){
+  if(!_renameSid) return;
+  const src=S.srcs.find(s=>s.id===_renameSid);
+  if(!src){hideM('rename');return;}
+  const newName=D.renameInput.value.trim();
+  if(!newName){msg('Имя не может быть пустым','error');return;}
+  if(newName!==src.name){
+    src.name=newName;
+    renderSources();
+    _coSafe(co=>co.broadcastSourceUpdate(src));
+    _markDirty();
+    _scheduleSettingsSave();
+  }
+  hideM('rename');
+  _renameSid=null;
 }
 
 function addVideoSource(type,name,stream,isP=false,pid=null,opts){
@@ -2283,7 +2402,15 @@ function addVideoSource(type,name,stream,isP=false,pid=null,opts){
   const msid=opts.msid||(stream?stream.id:null);
   const src={id,gid:id,ownerPeerId:owner,name,type,stream,msid,el:null,visible:true,locked:false,vol:1,muted:false,isPeer:isP,peerId:pid,vst:[],monitor:false,camSettings:{brightness:0,contrast:0,saturation:0,temperature:6500,sharpness:0,hue:0,sepia:0,autoFocus:true,resolution:''},fxState:_loadFxStateForName(name)};
   if(stream&&stream.getVideoTracks().length){const v=document.createElement('video');v.srcObject=stream;v.muted=true;v.playsInline=true;v.play().catch(()=>{});src.el=v;}
-  S.srcs.push(src);
+  // New sources go after locked sources (= locked stay on top)
+  if(!isP){
+    const lastLockedIdx=S.srcs.findLastIndex(s=>s.locked);
+    if(lastLockedIdx>=0){
+      S.srcs.splice(lastLockedIdx+1,0,src);
+    }else{
+      S.srcs.unshift(src);
+    }
+  } else { S.srcs.push(src); }
   if(src.el) addScene(src,!opts.suppressBroadcast); // create item; broadcast unless we're applying a remote op
   if(!isP&&S.wrtc&&stream) S.wrtc.addLocalStreamToAllPeers(stream);
   _wireTrackEndHandlers(src);
@@ -2339,7 +2466,18 @@ function rmSrc(sid){
   if(S.co&&!_isRemote()) S.co.broadcastSourceRemove(sid);
 }
 function togVis(sid){const s=S.srcs.find(x=>x.id===sid);if(s){s.visible=!s.visible;renderSources();updateE();_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}}
-function togLock(sid){const s=S.srcs.find(x=>x.id===sid);if(s){s.locked=!s.locked;if(s.locked&&S.selItem===sid){S.selItem=null;S.selId=null;}renderSources();msg(s.locked?'Источник заблокирован':'Источник разблокирован','info');_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}}
+function togLock(sid){const s=S.srcs.find(x=>x.id===sid);if(!s)return;s.locked=!s.locked;if(s.locked&&S.selItem===sid){S.selItem=null;S.selId=null;}
+  // Reorder: locked sources float to top, unlocked sink below locked ones
+  const idx=S.srcs.indexOf(s);
+  if(idx>=0)S.srcs.splice(idx,1);
+  if(s.locked){
+    S.srcs.unshift(s);
+  }else{
+    const lastLocked=S.srcs.findLastIndex(x=>x.locked);
+    if(lastLocked>=0) S.srcs.splice(lastLocked+1,0,s);
+    else S.srcs.unshift(s);
+  }
+  rebuildZ();renderSources();msg(s.locked?'Источник заблокирован':'Источник разблокирован','info');_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}
 function selSrc(sid){
   const s=S.srcs.find(x=>x.id===sid);
   if(s&&s.locked){msg('Источник заблокирован — снимите блокировку для редактирования','info');return;}
@@ -2349,8 +2487,9 @@ function addScene(src,broadcast){
   // If an item for this src already exists (e.g. applied from remote snapshot), don't duplicate.
   if(S.items.some(x=>x.sid===src.id)) return;
   const cw=S.cw,ch=S.ch;const ex=S.items.filter(x=>S.srcs.find(s=>s.id===x.sid&&s.el));
+  const isDisplay=(src.type==='screen'||src.type==='window'||src.type==='desktop');
   let w,h,cx,cy;
-  if(!ex.length){cx=cw/2;cy=ch/2;w=cw;h=ch;}else{w=cw*.3;h=ch*.3;cx=cw-w/2-10;cy=ch-h/2-10;}
+  if(!ex.length||isDisplay){cx=cw/2;cy=ch/2;w=cw;h=ch;}else{w=cw*.3;h=ch*.3;cx=cw-w/2-10;cy=ch-h/2-10;}
   const it={sid:src.id,cx,cy,w,h,z:0,rot:0,flipH:false,flipV:false,crop:{l:0,t:0,r:0,b:0},cropMask:'none',frameSettings:JSON.parse(JSON.stringify(framePresets.none)),uncropW:w,uncropH:h,uncropCx:cx,uncropCy:cy,origVW:0,origVH:0,naturalAR:w/h,prevRect:null,panDx:0,panDy:0};
   S.items.push(it);
   if(src.el){const r=()=>{it.origVW=src.el.videoWidth||1920;it.origVH=src.el.videoHeight||1080;it.naturalAR=it.origVW/it.origVH;};if(src.el.readyState>=1)r();else src.el.onloadedmetadata=r;}
@@ -2374,6 +2513,7 @@ function renderSources(){
       <div class="source-icon">${typeIcon}</div>
       <div class="source-info"><div class="source-name">${esc(s.name)}</div><div class="source-type">${tl}${s.isPeer?' (друг)':''}${s.locked?' · 🔒':''}</div></div>
       <div class="source-actions">
+        <button class="btn-icon" data-a="rename" title="Переименовать"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
         ${gearBtn}
         <button class="btn-icon ${s.locked?'locked':''}" data-a="lock" title="${s.locked?'Разблокировать':'Заблокировать'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${lockSvg}</svg></button>
         <button class="btn-icon ${!s.visible?'':'toggle-on'}" data-a="tog" title="${s.visible?'Скрыть':'Показать'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${ic}</svg></button>
@@ -3188,7 +3328,7 @@ function _showCamSettingsModal(srcId,openTab){
     const hasCamFx=src.camSettings&&(src.camSettings.brightness!==0||src.camSettings.contrast!==0||src.camSettings.saturation!==0||(src.camSettings.temperature&&src.camSettings.temperature!==6500)||(src.camSettings.sharpness&&src.camSettings.sharpness>0)||(src.camSettings.hue&&src.camSettings.hue!==0)||(src.camSettings.sepia&&src.camSettings.sepia!==0));
     if(hasCamFx){const f=_buildCamFilterStr(src.camSettings);if(f)previewCtx.filter=f;}
 
-    const sx=cr.l*vw,sy=cr.t*vh;const pdx2=it.panDx||0,pdy2=it.panDy||0;const sw2=Math.max(1,vw*(1-cr.l-cr.r)),sh2=Math.max(1,vh*(1-cr.t-cr.b));if(it.cropMask==='circle'){const cs2=Math.max(dw/sw2,dh/sh2)*CIRCLE_PAN_ZOOM;const ddw=sw2*cs2,ddh=sh2*cs2;previewCtx.drawImage(v,sx-pdx2*(sw2/ddw),sy-pdy2*(sh2/ddh),sw2,sh2,-ddw/2,-ddh/2,ddw,ddh);}else{const scX2=sw2/dw,scY2=sh2/dh;previewCtx.drawImage(v,sx-pdx2*scX2,sy-pdy2*scY2,sw2,sh2,-dw/2,-dh/2,dw,dh);}
+    const sx=cr.l*vw,sy=cr.t*vh;const pdx2=it.panDx||0,pdy2=it.panDy||0;const sw2=Math.max(1,vw*(1-cr.l-cr.r)),sh2=Math.max(1,vh*(1-cr.t-cr.b));if(it.cropMask&&it.cropMask!=='none'){const cs2=Math.max(dw/sw2,dh/sh2)*CIRCLE_PAN_ZOOM;const ddw=sw2*cs2,ddh=sh2*cs2;previewCtx.drawImage(v,sx-pdx2*(sw2/ddw),sy-pdy2*(sh2/ddh),sw2,sh2,-ddw/2,-ddh/2,ddw,ddh);}else{const scX2=sw2/dw,scY2=sh2/dh;previewCtx.drawImage(v,sx-pdx2*scX2,sy-pdy2*scY2,sw2,sh2,-dw/2,-dh/2,dw,dh);}
     if(hasCamFx) previewCtx.filter='none';
 
     // Draw border (preview-mode flag for adaptive halo). Edge fade is applied inside _drawBorder.
@@ -3246,7 +3386,7 @@ function _showCamSettingsModal(srcId,openTab){
     // Cam filter
     const camFs=_buildCamFilterStr(src.camSettings);
     if(camFs) frameCtx.filter=camFs;
-    const sx=cr.l*vw,sy=cr.t*vh;const pdx3=it.panDx||0,pdy3=it.panDy||0;const sw3=Math.max(1,vw*(1-cr.l-cr.r)),sh3=Math.max(1,vh*(1-cr.t-cr.b));if(it.cropMask==='circle'){const cs3=Math.max(dw/sw3,dh/sh3);const ddw3=sw3*cs3,ddh3=sh3*cs3;frameCtx.drawImage(v,sx-pdx3*(sw3/ddw3),sy-pdy3*(sh3/ddh3),sw3,sh3,-ddw3/2,-ddh3/2,ddw3,ddh3);}else{const scX3=sw3/dw,scY3=sh3/dh;frameCtx.drawImage(v,sx-pdx3*scX3,sy-pdy3*scY3,sw3,sh3,-dw/2,-dh/2,dw,dh);}
+    const sx=cr.l*vw,sy=cr.t*vh;const pdx3=it.panDx||0,pdy3=it.panDy||0;const sw3=Math.max(1,vw*(1-cr.l-cr.r)),sh3=Math.max(1,vh*(1-cr.t-cr.b));if(it.cropMask&&it.cropMask!=='none'){const cs3=Math.max(dw/sw3,dh/sh3)*CIRCLE_PAN_ZOOM;const ddw3=sw3*cs3,ddh3=sh3*cs3;frameCtx.drawImage(v,sx-pdx3*(sw3/ddw3),sy-pdy3*(sh3/ddh3),sw3,sh3,-ddw3/2,-ddh3/2,ddw3,ddh3);}else{const scX3=sw3/dw,scY3=sh3/dh;frameCtx.drawImage(v,sx-pdx3*scX3,sy-pdy3*scY3,sw3,sh3,-dw/2,-dh/2,dw,dh);}
     frameCtx.filter='none';
 
     // Draw frame
@@ -3436,7 +3576,7 @@ function _showCamSettingsModal(srcId,openTab){
       if(!it) return;
       const mask=btn.dataset.mask;
       it.cropMask=mask==='none'?undefined:mask;
-      if(mask==='circle'){const sq=Math.min(it.w,it.h);it.w=sq;it.h=sq;_enforceCircle(it);}
+      if(mask==='circle'||mask==='rect'){const sq=Math.min(it.w,it.h);it.w=sq;it.h=sq;_enforceCircle(it);}
       document.querySelectorAll('.mask-btn').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
     };
@@ -3595,7 +3735,7 @@ async function _changeCamResolution(src,w,h){
     // Hard release: stop old track BEFORE requesting new one (Windows USB cams keep buffers otherwise)
     try{oldTrack.stop();}catch(_){}
     try{src.stream.removeTrack(oldTrack);}catch(_){}
-    const constraints={audio:false,video:{}};
+    const constraints={audio:false,video:{frameRate:{ideal:30,min:15}}};
     if(deviceId) constraints.video.deviceId={exact:deviceId};
     if(w>0&&h>0){constraints.video.width={ideal:w};constraints.video.height={ideal:h};}
     const ns=await navigator.mediaDevices.getUserMedia(constraints);
@@ -3688,8 +3828,70 @@ function startRecording(){
 // ═══════════════════════════════════════════════════════════
 //  WebRTC
 // ═══════════════════════════════════════════════════════════
-async function createRoom(){try{const now=Date.now();if(now-S._lastRoomCreateAt<5000){msg('Подождите 5 секунд перед созданием новой комнаты','info');return;}S._lastRoomCreateAt=now;if(!S.wrtc)S.wrtc=new WebRTCManager();S.wrtc.setSignalingServer(D.signalingServer.value.trim()||'wss://streambro.ru/signaling');S.wrtc.setTurnConfig(D.turnServerUrl?D.turnServerUrl.value:'',D.turnServerUser?D.turnServerUser.value:'',D.turnServerPass?D.turnServerPass.value:'');setupW();D.connectError.style.display='none';D.btnCreateRoom.textContent='Подключение...';D.btnCreateRoom.disabled=true;await S.wrtc.connect();S.wrtc.createRoom();}catch(e){D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;}}
-async function joinRoom(){try{if(!S.wrtc)S.wrtc=new WebRTCManager();S.wrtc.setSignalingServer(D.signalingServer.value.trim()||'wss://streambro.ru/signaling');S.wrtc.setTurnConfig(D.turnServerUrl?D.turnServerUrl.value:'',D.turnServerUser?D.turnServerUser.value:'',D.turnServerPass?D.turnServerPass.value:'');setupW();const c=D.joinRoomCode.value.trim().toUpperCase();if(!c){D.connectError.textContent='Введите код';D.connectError.style.display='block';return;}D.connectError.style.display='none';D.btnJoinRoom.textContent='Подключение...';D.btnJoinRoom.disabled=true;await S.wrtc.connect();S.wrtc.joinRoom(c);}catch(e){D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';D.btnJoinRoom.textContent='Подключиться';D.btnJoinRoom.disabled=false;}}
+async function createRoom(){
+  try{
+    const now=Date.now();if(now-S._lastRoomCreateAt<5000){msg('Подождите 5 секунд','info');return;}
+    S._lastRoomCreateAt=now;
+    if(!S.wrtc)S.wrtc=new WebRTCManager();
+    // Auto-fetch TURN credentials from server
+    try{const tc=await window.electronAPI.getTurnCredentials?.();if(tc&&tc.url)S.wrtc.setTurnConfig(tc.url,tc.username,tc.credential);}catch{}
+    setupW();
+    D.connectError.style.display='none';
+    D.btnCreateRoom.textContent='Создание...';D.btnCreateRoom.disabled=true;
+    if(window.electronAPI&&window.electronAPI.roomsCreate){
+      const r=await window.electronAPI.roomsCreate({name:''});
+      if(!r||!r.ok){throw new Error(r?.error||'Ошибка создания комнаты');}
+      const code=r.data?.code;
+      if(!code){throw new Error('Сервер не вернул код комнаты');}
+      S.wrtc.roomCode=code;
+      S.wrtc.myPeerId=S.settings?.profile?.userId||'local';
+      S.wrtc.setSignalingChannel((signalMsg)=>{
+        window.electronAPI.presenceSend(JSON.stringify(signalMsg));
+      });
+      if(S.wrtc.onRoomCreated)S.wrtc.onRoomCreated(code,S.wrtc.myPeerId);
+      msg('Комната создана: '+code,'ok');
+    }else{
+      S.wrtc.setSignalingServer('wss://streambro.ru/signaling');
+      await S.wrtc.connect();S.wrtc.createRoom();
+    }
+    D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;
+  }catch(e){
+    D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';
+    D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;
+  }
+}
+async function joinRoom(){
+  try{
+    if(!S.wrtc)S.wrtc=new WebRTCManager();
+    try{const tc=await window.electronAPI.getTurnCredentials?.();if(tc&&tc.url)S.wrtc.setTurnConfig(tc.url,tc.username,tc.credential);}catch{}
+    setupW();
+    const c=D.joinRoomCode.value.trim().toUpperCase();
+    if(!c){D.connectError.textContent='Введите код';D.connectError.style.display='block';return;}
+    D.connectError.style.display='none';
+    D.btnJoinRoom.textContent='Подключение...';D.btnJoinRoom.disabled=true;
+    if(window.electronAPI&&window.electronAPI.roomsJoin){
+      const r=await window.electronAPI.roomsJoin(c);
+      if(!r||!r.ok){throw new Error(r?.error||'Комната не найдена');}
+      S.wrtc.roomCode=c;
+      S.wrtc.myPeerId=S.settings?.profile?.userId||'local';
+      S.wrtc.setSignalingChannel((signalMsg)=>{
+        window.electronAPI.presenceSend(JSON.stringify(signalMsg));
+      });
+      const roomData=r.data||{};
+      const peerIds=roomData.members?roomData.members.filter(m=>m.userId!==S.wrtc.myPeerId).map(m=>m.userId):[];
+      for(const pid of peerIds){S.wrtc._createPeerConnection(pid,true);}
+      if(S.wrtc.onRoomJoined)S.wrtc.onRoomJoined(c,S.wrtc.myPeerId,peerIds);
+      msg('Вы в комнате: '+c,'ok');
+    }else{
+      S.wrtc.setSignalingServer('wss://streambro.ru/signaling');
+      await S.wrtc.connect();S.wrtc.joinRoom(c);
+    }
+    D.btnJoinRoom.textContent='Подключиться';D.btnJoinRoom.disabled=false;
+  }catch(e){
+    D.connectError.textContent='Ошибка: '+(e.message||e);D.connectError.style.display='block';
+    D.btnJoinRoom.textContent='Подключиться';D.btnJoinRoom.disabled=false;
+  }
+}
 function setupW(){
   // ── Co-session engine — wired ONCE per page lifetime ──
   if(!S.co){
@@ -3941,6 +4143,14 @@ function _initSoundSystem() {
 async function _initProfileAndFriends() {
   try { if (window.SBProfile) await window.SBProfile.boot(); } catch (e) { console.warn('[Profile] boot failed', e); }
   try { if (window.SBFriends) await window.SBFriends.boot(); } catch (e) { console.warn('[Friends] boot failed', e); }
+  // Sync friends from server if logged in
+  if (window.electronAPI && window.electronAPI.friendsSync) {
+    try { await window.electronAPI.friendsSync(); } catch (e) { if(window.__sbDev) console.warn('[Friends] sync failed', e); }
+  }
+  // Auto-connect to Presence WS if logged in (for signaling + presence + chat)
+  if (window.electronAPI && window.electronAPI.presenceConnect) {
+    try { await window.electronAPI.presenceConnect(); } catch (e) { if(window.__sbDev) console.warn('[Presence] auto-connect failed', e); }
+  }
 }
 
 function _initSettingsTabs() {
@@ -4151,4 +4361,5 @@ function _persistSettingsSafe() {
 }
 
 document.addEventListener('DOMContentLoaded',init);
+window.msg = msg;
 })();

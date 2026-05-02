@@ -353,6 +353,10 @@ class WebRTCManager {
     this.onPeerTrack = null;       // (event, peerId) — raw track event
     this.signalingServerUrl = 'wss://streambro.ru/signaling';
 
+    // Server-mediated signaling via Presence WS
+    this._usePresenceSignaling = false; // true = use Presence WS relay
+    this._presenceSignalSend = null;     // (msg) => void — sends via Presence WS
+
     this.turnUrl = '';
     this.turnUser = '';
     this.turnPass = '';
@@ -367,6 +371,33 @@ class WebRTCManager {
   }
 
   setSignalingServer(url) { this.signalingServerUrl = url; }
+
+  // Use Presence WebSocket as signaling channel (server-mediated P2P)
+  setSignalingChannel(sendFn, onSignalFn) {
+    this._usePresenceSignaling = true;
+    this._presenceSignalSend = sendFn; // (msg) => void — posts signal to Presence WS
+    if (onSignalFn) this._onPresenceSignal = onSignalFn;
+  }
+
+  // Called by main process when Presence WS receives a signal message
+  handlePresenceSignal(msg) {
+    if (msg.type === 'signal') {
+      this._handleSignal(msg.fromPeerId, msg.signal);
+    } else if (msg.type === 'room-joined-server') {
+      // Server-room join: we get room code + list of existing peer user IDs
+      this.myPeerId = msg.myUserId;
+      this.roomCode = msg.roomCode;
+      for (const existingPeerId of msg.peers) {
+        this._createPeerConnection(existingPeerId, true);
+      }
+      if (this.onRoomJoined) this.onRoomJoined(msg.roomCode, msg.myUserId, msg.peers);
+    } else if (msg.type === 'peer-joined-server') {
+      this._createPeerConnection(msg.peerId, false);
+      if (this.onPeersList) this.onPeersList(msg.peerId);
+    } else if (msg.type === 'peer-left-server') {
+      this._removePeer(msg.peerId);
+    }
+  }
 
   setTurnConfig(url, user, pass) {
     this.turnUrl  = (url  || '').trim();
@@ -403,7 +434,16 @@ class WebRTCManager {
   }
 
   _signalingSend(msg) {
-    if (this.ws && this.ws.readyState === 1) {
+    if (this._usePresenceSignaling && this._presenceSignalSend) {
+      // Route through Presence WS (server-mediated)
+      const signalMsg = {
+        type: 'signal',
+        targetPeerId: msg.targetPeerId,
+        signal: msg.signal,
+        roomCode: this.roomCode,
+      };
+      this._presenceSignalSend(signalMsg);
+    } else if (this.ws && this.ws.readyState === 1) {
       this.ws.send(JSON.stringify(msg));
     }
   }

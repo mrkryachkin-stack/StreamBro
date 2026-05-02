@@ -53,7 +53,7 @@ function getPublic() {
   };
 }
 
-function update(patch) {
+function update(patch, skipServerSync) {
   if (!_settings || !patch) return { success: false };
   const allowed = ['nickname', 'email', 'avatar', 'statusManual', 'autoStreamingStatus'];
   for (const k of allowed) {
@@ -62,7 +62,51 @@ function update(patch) {
   if (patch.consents && typeof patch.consents === 'object') {
     _settings.profile.consents = { ..._settings.profile.consents, ...patch.consents };
   }
-  return _save();
+  const res = _save();
+  // Sync profile fields to server if registered (skip when already synced by caller)
+  if (res.success && !skipServerSync && _settings.profile.registered && getToken()) {
+    _syncToServer(patch);
+  }
+  return res;
+}
+
+function _syncToServer(patch) {
+  const { net } = require('electron');
+  const token = getToken();
+  if (!token) return;
+  const serverPatch = {};
+  const syncFields = ['nickname', 'statusManual'];
+  for (const f of syncFields) {
+    if (patch[f] !== undefined) serverPatch[f] = patch[f];
+  }
+  // Map avatar → avatarUrl for server (emoji or URL)
+  if (patch.avatar !== undefined) {
+    serverPatch.avatarUrl = patch.avatar || null;
+  }
+  if (patch.nickname !== undefined) serverPatch.displayName = patch.nickname;
+  if (Object.keys(serverPatch).length === 0) return;
+  try {
+    const req = net.request({
+      method: 'PATCH',
+      url: 'https://streambro.ru/api/user/profile',
+    });
+    req.setHeader('Content-Type', 'application/json');
+    req.setHeader('Authorization', `Bearer ${token}`);
+    req.write(JSON.stringify(serverPatch));
+    req.on('response', (resp) => {
+      let body = '';
+      resp.on('data', (c) => { body += c; });
+      resp.on('end', () => {
+        if (resp.statusCode >= 400 && process.env.NODE_ENV !== 'production') {
+          console.warn('[Profile] server sync failed:', resp.statusCode, body.slice(0, 200));
+        }
+      });
+    });
+    req.on('error', () => {});
+    req.end();
+  } catch (e) {
+    if (process.env.NODE_ENV !== 'production') console.warn('[Profile] sync error:', e.message);
+  }
 }
 
 // ─── Token / session ───

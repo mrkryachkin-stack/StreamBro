@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ─── Profile (1.1.0) ───
   profileGet:        () => ipcRenderer.invoke('profile-get'),
   profileUpdate:     (patch) => ipcRenderer.invoke('profile-update', patch),
+  profileUploadAvatar: (fileData) => ipcRenderer.invoke('profile-upload-avatar', fileData),
+  profileChangePassword: (currentPassword, newPassword) => ipcRenderer.invoke('profile-change-password', currentPassword, newPassword),
   profileLogout:     () => ipcRenderer.invoke('profile-logout'),
   profileOpenSignup: () => ipcRenderer.invoke('profile-open-signup'),
   profileOpenLogin:  () => ipcRenderer.invoke('profile-open-login'),
@@ -71,13 +73,49 @@ contextBridge.exposeInMainWorld('electronAPI', {
   friendsUnread:      () => ipcRenderer.invoke('friends-unread'),
   friendsAdd:         (payload) => ipcRenderer.invoke('friends-add', payload),
   friendsDevAdd:      (payload) => ipcRenderer.invoke('friends-dev-add', payload),
+  friendsSync:       () => ipcRenderer.invoke('friends-sync'),
   friendsRemove:      (friendId) => ipcRenderer.invoke('friends-remove', friendId),
   friendsSetStatus:   (friendId, status) => ipcRenderer.invoke('friends-set-status', { friendId, status }),
   friendsSendMessage: (friendId, text) => ipcRenderer.invoke('friends-send-msg', { friendId, text }),
   friendsMarkRead:    (friendId) => ipcRenderer.invoke('friends-mark-read', friendId),
   friendsDevInbound:  (friendId, text) => ipcRenderer.invoke('friends-dev-inbound', { friendId, text }),
+  friendsSearch:      (q) => ipcRenderer.invoke('friends-search', q),
+  friendsAccept:      (friendshipId) => ipcRenderer.invoke('friends-accept', friendshipId),
+  friendsReject:      (friendshipId) => ipcRenderer.invoke('friends-reject', friendshipId),
+  chatEdit:           (messageId, content) => ipcRenderer.invoke('chat-edit', { messageId, content }),
+  chatDelete:         (messageId) => ipcRenderer.invoke('chat-delete', { messageId }),
   onFriendsChanged:   (cb) => ipcRenderer.on('friends-changed', (_, data) => cb(data)),
   onFriendsMessage:   (cb) => ipcRenderer.on('friends-message', (_, data) => cb(data)),
+
+  // ─── Rooms (co-stream) ───
+  roomsCreate:         (opts) => ipcRenderer.invoke('rooms-create', opts),
+  roomsJoin:           (code) => ipcRenderer.invoke('rooms-join', code),
+  roomsLeave:          (code) => ipcRenderer.invoke('rooms-leave', code),
+  roomsGet:            (code) => ipcRenderer.invoke('rooms-get', code),
+  roomsList:           () => ipcRenderer.invoke('rooms-list'),
+  roomsInvite:         (code, friendId) => ipcRenderer.invoke('rooms-invite', { code, friendId }),
+
+  // ─── Cloud settings sync ───
+  cloudSettingsGet:    () => ipcRenderer.invoke('cloud-settings-get'),
+  cloudSettingsPut:    (blob) => ipcRenderer.invoke('cloud-settings-put', blob),
+  cloudSettingsDelete: () => ipcRenderer.invoke('cloud-settings-delete'),
+
+  // ─── Stream events ───
+  streamEventStart:    (platform) => ipcRenderer.invoke('stream-event-start', platform),
+  streamEventEnd:      (eventId) => ipcRenderer.invoke('stream-event-end', eventId),
+  streamEventReconnect:(eventId) => ipcRenderer.invoke('stream-event-reconnect', eventId),
+  streamEventHistory:  () => ipcRenderer.invoke('stream-event-history'),
+  streamEventStats:    () => ipcRenderer.invoke('stream-event-stats'),
+  onStreamNotification:(cb) => ipcRenderer.on('stream-notification', (_, data) => cb(data)),
+
+  // ─── Presence ───
+  presenceConnect:     () => ipcRenderer.invoke('presence-connect'),
+  presenceDisconnect:  () => ipcRenderer.invoke('presence-disconnect'),
+  presenceSetStatus:   (status) => ipcRenderer.invoke('presence-set-status', status),
+  presenceSend:       (msgJson) => ipcRenderer.invoke('presence-send', msgJson),
+  getTurnCredentials: () => ipcRenderer.invoke('get-turn-credentials'),
+  onPresenceUpdate:    (cb) => ipcRenderer.on('presence-update', (_, data) => cb(data)),
+  onPresenceSignal:   (cb) => ipcRenderer.on('presence-signal', (_, data) => cb(data)),
 
   // ─── Bug reporter (1.1.0) ───
   bugReport:        (payload) => ipcRenderer.invoke('bug-report', payload),

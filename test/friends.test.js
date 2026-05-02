@@ -33,6 +33,8 @@ function assert(cond, msg) {
   if (!cond) { console.error('FAIL:', msg); failed++; } else { console.log('  ok:', msg); }
 }
 
+(async function runTests() {
+
 console.log('## friends-store');
 
 const events = [];
@@ -87,13 +89,13 @@ const m3 = friends.sendMessage({ friendId: fid, text: '   ', fromMe: true });
 assert(!m3.success, 'empty msg rejected');
 
 // Friend request (outgoing) is queued
-const r4 = friends.sendFriendRequest({ code: 'ABCD-1234', message: 'hi' });
+const r4 = await friends.sendFriendRequest({ code: 'ABCD-1234', message: 'hi' });
 assert(r4.success, 'sendFriendRequest success');
 assert(friends.listRequests().outgoing.length === 1, 'outgoing request stored');
 assert(friends.listRequests().outgoing[0].code === 'ABCD-1234', 'request code preserved');
 
 // Remove friend
-const r5 = friends.removeFriend(fid);
+const r5 = await friends.removeFriend(fid);
 assert(r5.success, 'removeFriend success');
 assert(friends.listFriends().length === 0, 'friend removed from list');
 assert(friends.getChat(fid).length === 0, 'chat history removed too');
@@ -107,3 +109,5 @@ Module._load = _origLoad;
 
 if (failed > 0) { console.error('\n## friends: ' + failed + ' FAILED'); process.exit(1); }
 console.log('\n## friends: all tests passed');
+
+})();

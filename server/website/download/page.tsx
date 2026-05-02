@@ -66,7 +66,7 @@ export default function DownloadPage() {
 
           {/* Download button */}
           <a
-            href="/api/download/portable/StreamBro-1.1.0-portable.zip"
+            href="/api/download/portable/StreamBro-1.2.1-portable.zip"
             className="btn-gold"
             style={{ fontSize: "1.2rem", padding: "1.25rem 3.5rem", display: "inline-block", marginBottom: "2rem" }}
           >
@@ -87,7 +87,7 @@ export default function DownloadPage() {
             <h3 style={{ fontSize: "1.05rem", fontWeight: 700, marginBottom: "1.25rem" }}>Информация</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
               {[
-                ["Версия", "1.1.0"],
+                ["Версия", "1.2.1"],
                 ["Платформа", "Windows 10/11 x64"],
                 ["Размер", "~209 МБ"],
                 ["Формат", "Portable (.zip) — без установки"],

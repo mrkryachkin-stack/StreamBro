@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, session, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, session, Menu, net, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -8,6 +8,8 @@ const profileMgr = require('./modules/profile-manager');
 const friendsStore = require('./modules/friends-store');
 const bugReporter = require('./modules/bug-reporter');
 const autoUpdater = require('./modules/auto-updater');
+const serverApi = require('./modules/server-api');
+const cloudSync = require('./modules/cloud-sync');
 
 const IS_PACKAGED = app.isPackaged;
 
@@ -25,6 +27,15 @@ function _registerProtocol() {
 }
 _registerProtocol();
 
+// ─── Local avatar protocol: avatar://{filename} ───
+// Serves avatar images from %APPDATA%/StreamBro/avatars/ without needing the server.
+// Must be registered before app.ready for secure: true.
+const AVATAR_DIR = path.join(app.getPath('userData'), 'avatars');
+if (!fs.existsSync(AVATAR_DIR)) { try { fs.mkdirSync(AVATAR_DIR, { recursive: true }); } catch {} }
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'avatar', privileges: { secure: true, standard: false, supportFetchAPI: false, stream: true, corsEnabled: false } },
+]);
+
 // In production we keep the safer defaults. In dev we keep the workaround flags
 // for getDisplayMedia + chromeMediaSource constraint quirks in some Electron 33 builds.
 if (!IS_PACKAGED) {
@@ -41,12 +52,19 @@ if (!gotLock) {
   app.quit();
 }
 
+// Set Windows taskbar and process name to "StreamBro" instead of "Electron"
+app.setAppUserModelId('com.streambro.app');
+if (app.isPackaged) {
+  app.setName('StreamBro');
+}
+
 let mainWindow;
 let ffmpegRecProcess = null;
 let ffmpegStreamProcess = null;
 let ffmpegStreamReconnectTimer = null;
 let ffmpegStreamArgs = null; // saved for auto-reconnect
 let ffmpegStreamAttempts = 0; // consecutive failed attempts (resets on live)
+let currentStreamEventId = null; // server-side stream event tracking
 const FFMPEG_STREAM_MAX_ATTEMPTS = 3;
 
 let appSettings = null; // loaded on app ready
@@ -180,12 +198,23 @@ app.whenReady().then(() => {
   appSettings = settingsMod.loadSettings();
 
   // Profile / friends / bug-reporter / auto-updater wiring.
-  // Each module gets the shared settings object (mutates in place) and a save
-  // callback so the renderer is notified after persistence.
   profileMgr.init(appSettings, (s) => { appSettings = s; _emit('profile-updated', profileMgr.getPublic()); });
   friendsStore.init(appSettings, (s) => { appSettings = s; }, (channel, data) => _emit(channel, data));
+  friendsStore.setServerApi(serverApi);
   bugReporter.init(appSettings, (s) => { appSettings = s; });
   autoUpdater.init(appSettings, (channel, data) => _emit(channel, data), app.getVersion());
+
+  // Register avatar:// protocol to serve local avatar files
+  protocol.handle('avatar', (request) => {
+    const fname = decodeURIComponent(request.url.replace('avatar://', '').replace(/^\/+/, ''));
+    const safeName = path.basename(fname); // prevent directory traversal
+    const filePath = path.join(AVATAR_DIR, safeName);
+    if (!fs.existsSync(filePath)) return new Response('not found', { status: 404 });
+    const ext = path.extname(safeName).toLowerCase();
+    const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+    const data = fs.readFileSync(filePath);
+    return new Response(data, { headers: { 'content-type': mimeMap[ext] || 'application/octet-stream', 'cache-control': 'public, max-age=86400' } });
+  });
 
   createWindow();
 
@@ -404,6 +433,27 @@ function _silenceStdio(proc) {
   try { proc.stderr && proc.stderr.on('error', noop); } catch (e) {}
 }
 
+// ─── Stream event reporting (server-side analytics) ───
+async function _onStreamLive() {
+  if (ffmpegStreamArgs && ffmpegStreamArgs.platform) {
+    try {
+      const r = await serverApi.streamEventStart(ffmpegStreamArgs.platform);
+      if (r.ok && r.data) currentStreamEventId = r.data.id;
+    } catch {}
+  }
+  serverApi.presenceNotifyStreamStart(ffmpegStreamArgs?.platform || 'unknown');
+}
+
+async function _onStreamEnd() {
+  if (currentStreamEventId) {
+    try {
+      await serverApi.streamEventEnd(currentStreamEventId);
+    } catch {}
+    currentStreamEventId = null;
+  }
+  serverApi.presenceNotifyStreamEnd();
+}
+
 function stopFFmpegStream(reasonForRenderer) {
   if (ffmpegStreamReconnectTimer) {
     clearTimeout(ffmpegStreamReconnectTimer);
@@ -416,6 +466,7 @@ function stopFFmpegStream(reasonForRenderer) {
     ffmpegStreamProcess = null;
   }
   _emit('stream-status', { state: 'offline', reason: reasonForRenderer || null });
+  _onStreamEnd();
 }
 
 function _emit(channel, data) {
@@ -685,6 +736,7 @@ function _spawnStream(isReconnect) {
       connected = true;
       ffmpegStreamAttempts = 0;
       _emit('stream-status', { state: 'live', reason: null });
+      _onStreamLive();
     }
   }, 8000);
 
@@ -702,6 +754,7 @@ function _spawnStream(isReconnect) {
       connected = true;
       ffmpegStreamAttempts = 0;
       _emit('stream-status', { state: 'live', reason: null });
+      _onStreamLive();
     }
   });
 
@@ -898,6 +951,94 @@ ipcMain.handle('show-in-folder', (event, { path: filePath }) => {
 // ─── Profile IPC (1.1.0) ───
 ipcMain.handle('profile-get',         () => profileMgr.getPublic());
 ipcMain.handle('profile-update',      (_e, patch) => profileMgr.update(patch));
+ipcMain.handle('profile-change-password', async (_e, currentPassword, newPassword) => {
+  return serverApi.changePassword(currentPassword, newPassword);
+});
+ipcMain.handle('profile-upload-avatar', async (_e, filePayload) => {
+  let fileData, fileName, contentType;
+
+  if (typeof filePayload === 'string') {
+    if (!fs.existsSync(filePayload)) return { error: 'file not found' };
+    const stat = fs.statSync(filePayload);
+    if (stat.size > 2 * 1024 * 1024) return { error: 'File too large (max 2MB)' };
+    const ext = path.extname(filePayload).toLowerCase();
+    if (!['.jpg','.jpeg','.png','.gif','.webp'].includes(ext)) return { error: 'Invalid format' };
+    fileData = fs.readFileSync(filePayload);
+    fileName = path.basename(filePayload);
+    contentType = ext === '.jpg' ? 'image/jpeg' : `image/${ext.slice(1)}`;
+  } else if (filePayload && (filePayload.buffer || filePayload.data)) {
+    if (filePayload.buffer) {
+      const raw = filePayload.buffer;
+      fileData = Buffer.isBuffer(raw) ? raw : Buffer.from(raw.buffer || raw, raw.byteOffset || 0, raw.byteLength || raw.length);
+    } else {
+      fileData = Buffer.from(filePayload.data);
+    }
+    if (fileData.length > 2 * 1024 * 1024) return { error: 'File too large (max 2MB)' };
+    fileName = filePayload.name || 'avatar.png';
+    contentType = filePayload.type || 'image/png';
+    console.log(`[Avatar] received: ${fileData.length} bytes, name=${fileName}, type=${contentType}`);
+  } else {
+    console.warn('[Avatar] invalid payload type:', typeof filePayload);
+    return { error: 'invalid payload' };
+  }
+
+  // 1. Save locally to %APPDATA%/StreamBro/avatars/{userId}.{ext}
+  const localExt = path.extname(fileName).toLowerCase() || '.png';
+  const userId = (appSettings.profile && appSettings.profile.serverId) || appSettings.profile.id || 'local';
+  const localName = `${userId}${localExt}`;
+  const localPath = path.join(AVATAR_DIR, localName);
+  try {
+    fs.writeFileSync(localPath, fileData);
+    console.log(`[Avatar] saved locally: ${localPath}`);
+  } catch (e) {
+    console.warn('[Avatar] local save error:', e.message);
+    return { error: 'Failed to save avatar locally' };
+  }
+
+  // 2. Set avatar to local protocol URL immediately
+  const localUrl = `avatar://${localName}`;
+  profileMgr.update({ avatar: localUrl }, true);
+  console.log(`[Avatar] local avatar set: ${localUrl}`);
+
+  // 3. Try to sync to server (non-blocking, don't wait for result)
+  const token = profileMgr.getToken();
+  if (token) {
+    const boundary = '----SBAvatar' + Date.now();
+    const header = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="avatar"; filename="${fileName}"\r\nContent-Type: ${contentType}\r\n\r\n`);
+    const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([header, fileData, footer]);
+
+    const request = net.request({
+      method: 'POST',
+      url: 'https://streambro.ru/api/user/profile/avatar',
+    });
+    request.setHeader('Content-Type', `multipart/form-data; boundary=${boundary}`);
+    request.setHeader('Authorization', `Bearer ${token}`);
+    request.write(body);
+    request.on('response', (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk.toString(); });
+      response.on('end', () => {
+        console.log(`[Avatar] server sync: ${response.statusCode} ${data.slice(0, 200)}`);
+        if (response.statusCode < 400) {
+          try {
+            const json = JSON.parse(data);
+            if (json.avatarUrl) {
+              // Replace local avatar:// URL with server URL so website sees it too
+              profileMgr.update({ avatar: json.avatarUrl }, true);
+              _emit('avatar-synced', json.avatarUrl);
+              console.log(`[Avatar] synced to server: ${json.avatarUrl}`);
+            }
+          } catch {}
+        }
+      });
+    });
+    request.on('error', (err) => { console.warn('[Avatar] server sync failed (will use local):', err.message); });
+    request.end();
+  }
+
+  return { ok: true, avatarUrl: localUrl };
+});
 ipcMain.handle('profile-logout',      () => profileMgr.logout());
 ipcMain.handle('profile-open-signup', () => { profileMgr.openSignup();  return { success: true }; });
 ipcMain.handle('profile-open-login',  () => { profileMgr.openLogin();   return { success: true }; });
@@ -993,18 +1134,102 @@ ipcMain.handle('profile-register', async (_e, { email, username, password }) => 
   }
 });
 
-// ─── Friends IPC (1.1.0) ───
-ipcMain.handle('friends-list',        () => friendsStore.listFriends());
-ipcMain.handle('friends-requests',    () => friendsStore.listRequests());
-ipcMain.handle('friends-chat',        (_e, friendId) => friendsStore.getChat(friendId));
-ipcMain.handle('friends-unread',      () => friendsStore.getUnreadCounts());
-ipcMain.handle('friends-add',         (_e, payload) => friendsStore.sendFriendRequest(payload || {}));
+// ─── Friends IPC (1.1.0) — hybrid: server API when authenticated, local fallback ───
+ipcMain.handle('friends-list',        async () => {
+  const token = profileMgr.getToken();
+  if (token) { const r = await serverApi.friendsList(); if (r.ok) return r.data; }
+  return friendsStore.listFriends();
+});
+ipcMain.handle('friends-requests',    async () => {
+  const token = profileMgr.getToken();
+  if (token) { const r = await serverApi.friendsPending(); if (r.ok) return r.data; }
+  return friendsStore.listRequests();
+});
+ipcMain.handle('friends-chat',        async (_e, friendId) => {
+  const token = profileMgr.getToken();
+  if (token) { const r = await serverApi.chatHistory(friendId); if (r.ok) return r.data; }
+  return friendsStore.getChat(friendId);
+});
+ipcMain.handle('friends-unread',      async () => {
+  const token = profileMgr.getToken();
+  if (token) { const r = await serverApi.chatUnread(); if (r.ok) return r.data; }
+  return friendsStore.getUnreadCounts();
+});
+ipcMain.handle('friends-add',         async (_e, payload) => {
+  // Use server-backed friends store (searches by code/username, sends request)
+  return await friendsStore.sendFriendRequest(payload || {});
+});
 ipcMain.handle('friends-dev-add',     (_e, payload) => friendsStore.devAddFriend(payload || {}));
-ipcMain.handle('friends-remove',      (_e, friendId) => friendsStore.removeFriend(friendId));
+ipcMain.handle('friends-sync',       async () => friendsStore.syncFromServer());
+ipcMain.handle('friends-remove',      async (_e, friendId) => {
+  const token = profileMgr.getToken();
+  if (token) { return serverApi.friendsRemove(friendId); }
+  return friendsStore.removeFriend(friendId);
+});
 ipcMain.handle('friends-set-status',  (_e, { friendId, status }) => friendsStore.setFriendStatus(friendId, status));
-ipcMain.handle('friends-send-msg',    (_e, payload) => friendsStore.sendMessage({ ...payload, fromMe: true }));
-ipcMain.handle('friends-mark-read',   (_e, friendId) => friendsStore.markRead(friendId));
+ipcMain.handle('friends-send-msg',    async (_e, payload) => {
+  const token = profileMgr.getToken();
+  if (token && payload.friendId && payload.text) {
+    const r = await serverApi.chatSend(payload.friendId, payload.text);
+    if (r.ok) return r.data;
+  }
+  return friendsStore.sendMessage({ ...payload, fromMe: true });
+});
+ipcMain.handle('friends-mark-read',   async (_e, friendId) => {
+  const token = profileMgr.getToken();
+  if (token) { /* chat/:userId GET already marks as read */ return { ok: true }; }
+  return friendsStore.markRead(friendId);
+});
+ipcMain.handle('chat-edit',          async (_e, { messageId, content }) => {
+  const token = profileMgr.getToken();
+  if (token) { const r = await serverApi.chatEdit(messageId, content); return r; }
+  return { ok: false, error: 'not authenticated' };
+});
+ipcMain.handle('chat-delete',        async (_e, { messageId }) => {
+  const token = profileMgr.getToken();
+  if (token) { const r = await serverApi.chatDelete(messageId); return r; }
+  return { ok: false, error: 'not authenticated' };
+});
 ipcMain.handle('friends-dev-inbound', (_e, { friendId, text }) => friendsStore.devSimulateInbound(friendId, text));
+ipcMain.handle('friends-search',    (_e, q) => serverApi.friendsSearch(q));
+ipcMain.handle('friends-accept',    (_e, friendshipId) => serverApi.friendsAccept(friendshipId));
+ipcMain.handle('friends-reject',    (_e, friendshipId) => serverApi.friendsReject(friendshipId));
+
+// ─── Rooms (co-stream) IPC ───
+ipcMain.handle('rooms-create',       (_e, opts) => serverApi.roomsCreate(opts));
+ipcMain.handle('rooms-join',         (_e, code) => serverApi.roomsJoin(code));
+ipcMain.handle('rooms-leave',        (_e, code) => serverApi.roomsLeave(code));
+ipcMain.handle('rooms-get',          (_e, code) => serverApi.roomsGet(code));
+ipcMain.handle('rooms-list',         () => serverApi.roomsList());
+ipcMain.handle('rooms-invite',       (_e, { code, friendId }) => serverApi.roomsInvite(code, friendId));
+
+// ─── Cloud settings IPC ───
+ipcMain.handle('cloud-settings-get',    () => cloudSync.download());
+ipcMain.handle('cloud-settings-put',    (_e, settings) => cloudSync.upload(settings));
+ipcMain.handle('cloud-settings-delete', () => cloudSync.remove());
+
+// ─── Stream events IPC ───
+ipcMain.handle('stream-event-start',     (_e, platform) => serverApi.streamEventStart(platform));
+ipcMain.handle('stream-event-end',       (_e, eventId) => serverApi.streamEventEnd(eventId));
+ipcMain.handle('stream-event-reconnect', (_e, eventId) => serverApi.streamEventReconnect(eventId));
+ipcMain.handle('stream-event-history',   () => serverApi.streamEventHistory());
+ipcMain.handle('stream-event-stats',     () => serverApi.streamEventStats());
+
+// ─── Presence IPC ───
+ipcMain.handle('presence-connect',    () => serverApi.presenceConnect());
+ipcMain.handle('presence-disconnect', () => serverApi.presenceDisconnect());
+ipcMain.handle('presence-set-status', (_e, status) => serverApi.presenceSetStatus(status));
+ipcMain.handle('presence-send',       (_e, msgJson) => serverApi.presenceSend(msgJson));
+ipcMain.handle('get-turn-credentials', async () => {
+  const token = profileManager.getToken();
+  if (!token) return { error: 'not authenticated' };
+  try {
+    const result = await serverApi.getTurnCredentials();
+    if (result.error) return result;
+    const d = result.data || result;
+    return { url: (d.urls && d.urls[0]) || '', username: d.username || '', credential: d.password || '' };
+  } catch (err) { return { error: err.message }; }
+});
 
 // ─── Bug reporter IPC (1.1.0) ───
 ipcMain.handle('bug-report',          (_e, payload) => bugReporter.report(payload || {}));

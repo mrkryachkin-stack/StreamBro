@@ -310,6 +310,18 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .bottom-panel>*{position:relative;z-index:1}
 .sidebar>*{position:relative;z-index:1}
 
+.hotkey-hint{
+  display:flex;flex-wrap:wrap;gap:2px 8px;padding:8px 10px;margin-top:auto;
+  opacity:.45;font-size:10px;color:var(--muted);line-height:1.5;
+  border-top:1px solid var(--glass-border);
+  flex-shrink:0;
+}
+.hotkey-hint kbd{
+  display:inline-block;padding:0 3px;border-radius:3px;
+  background:var(--bg2);border:1px solid var(--glass-border);
+  font-family:inherit;font-size:9px;color:var(--text2);
+}
+
 /* Top-bar accent strip — static glow line */
 .top-bar::before{
   content:'';position:absolute;left:0;right:0;bottom:0;height:1.5px;pointer-events:none;z-index:2;
@@ -656,8 +668,9 @@ select option{
 
 /* Self-status row at the top of Друзья section */
 .self-status-row{display:flex;align-items:center;gap:10px;padding:8px 8px 10px;border-bottom:1px solid var(--glass-border);margin-bottom:8px}
-.self-avatar{width:36px;height:36px;border-radius:50%;background:var(--accent-g);border:1.5px solid var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--accent);font-size:13px;overflow:hidden;flex-shrink:0}
+.self-avatar{width:36px;height:36px;border-radius:50%;background:var(--accent-g);border:1.5px solid var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--accent);font-size:20px;overflow:hidden;flex-shrink:0}
 .self-avatar img{width:100%;height:100%;object-fit:cover}
+.self-avatar .avatar-initials{font-size:13px}
 .self-meta{flex:1;min-width:0}
 .self-nick{font-size:12px;font-weight:600;color:var(--text);margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .self-status-select{width:100%;font-size:11px;padding:3px 6px;border-radius:var(--r-sm);background:var(--input-bg);color:var(--text);border:1px solid var(--input-border)}
@@ -667,8 +680,9 @@ select option{
 .friend-item:hover{border-color:var(--accent)}
 .friend-item.expanded{border-color:var(--accent);background:rgba(127,127,127,.08)}
 .friend-row{display:flex;align-items:center;gap:9px;padding:7px 8px;cursor:pointer}
-.friend-avatar{position:relative;width:32px;height:32px;border-radius:50%;background:var(--accent-g);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--text);font-size:11px;overflow:hidden;flex-shrink:0;border:1.5px solid var(--glass-border)}
+.friend-avatar{position:relative;width:32px;height:32px;border-radius:50%;background:var(--accent-g);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--text);font-size:18px;overflow:hidden;flex-shrink:0;border:1.5px solid var(--glass-border)}
 .friend-avatar img{width:100%;height:100%;object-fit:cover}
+.friend-avatar .avatar-initials{font-size:11px}
 .friend-status-dot{position:absolute;bottom:-1px;right:-1px;width:10px;height:10px;border-radius:50%;border:2px solid var(--bg1);background:var(--muted)}
 .status-online{background:#3ddc97}
 .status-offline{background:#5c5c66}
@@ -728,8 +742,15 @@ select option{
 .profile-card{display:flex;flex-direction:column;gap:14px}
 .profile-empty{color:var(--muted);font-size:12px;text-align:center;padding:20px}
 .profile-row{display:flex;gap:14px;align-items:center}
-.profile-avatar{width:64px;height:64px;border-radius:50%;background:var(--accent-g);border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
+.profile-avatar{width:64px;height:64px;border-radius:50%;background:var(--accent-g);border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
 .profile-avatar img{width:100%;height:100%;object-fit:cover}
+.avatar-initials{font-size:22px;font-weight:700}
+.avatar-picker{display:flex;flex-direction:column;gap:0.5rem}
+.avatar-presets{display:flex;flex-wrap:wrap;gap:4px}
+.avatar-preset{width:36px;height:36px;border-radius:50%;border:2px solid transparent;background:var(--bg2);font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color .15s}
+.avatar-preset:hover{border-color:var(--accent);background:var(--bg3)}
+.avatar-preset.selected{border-color:var(--accent);background:var(--accent-g);box-shadow:0 0 0 2px var(--accent)}
+.avatar-custom{display:flex;align-items:center;gap:0.5rem;margin-top:0.25rem}
 .profile-meta{flex:1;min-width:0}
 .profile-nick input{width:100%;padding:7px 10px;font-size:14px;font-weight:600;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:var(--r-sm)}
 .profile-nick input:focus{border-color:var(--accent);outline:none}

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self' blob: data:;
-                 img-src 'self' data: blob:;
+                 img-src 'self' data: blob: avatar: https://streambro.ru;
                  media-src 'self' blob: mediastream:;
                  style-src 'self' 'unsafe-inline';
                  script-src 'self';
@@ -104,6 +104,16 @@
             <div class="friends-list" id="friendsList"></div>
           </div>
         </div>
+        <div class="hotkey-hint">
+          <span><kbd>R</kbd> Сброс</span>
+          <span><kbd>H</kbd> Скрыть</span>
+          <span><kbd>L</kbd> Замок</span>
+          <span><kbd>M</kbd> Звук</span>
+          <span><kbd>G</kbd> Сетка</span>
+          <span><kbd>Del</kbd> Удалить</span>
+          <span><kbd>Space</kbd> Панорама</span>
+          <span><kbd>Ctrl+Z</kbd> Отмена</span>
+        </div>
       </aside>
     </main>
 
@@ -120,7 +130,6 @@
             <button class="btn-icon" id="btnMixerAdd" title="Добавить микрофон"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
             <div class="mixer-add-dropdown" id="mixerAddDropdown">
               <button class="dropdown-item" data-madd="mic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg> Микрофон</button>
-              <button class="dropdown-item" data-madd="desktop"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Звук рабочего стола</button>
             </div>
           </div>
         </div>
@@ -131,17 +140,9 @@
     <!-- Connect Modal -->
     <div class="modal-overlay" id="connectModal" style="display:none">
       <div class="modal glass">
-        <div class="modal-header"><h2>Подключение к другу</h2><button class="btn-icon" id="btnCloseConnectModal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+        <div class="modal-header"><h2>Совместный стрим</h2><button class="btn-icon" id="btnCloseConnectModal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
         <div class="modal-body">
-          <div class="form-group"><label>Сигналинг-сервер</label><input type="text" id="signalingServer" value="ws://localhost:7890" placeholder="ws://ваш-vps:7890"/></div>
-          <details class="turn-details" id="turnDetails">
-            <summary>TURN-сервер (для связи из разных сетей)</summary>
-            <div class="turn-fields">
-              <div class="form-group"><label>TURN URL</label><input type="text" id="turnServerUrl" placeholder="turn:ваш-vps:3478"/></div>
-              <div class="form-group"><label>Логин</label><input type="text" id="turnServerUser" placeholder="streambro"/></div>
-              <div class="form-group"><label>Пароль</label><input type="password" id="turnServerPass" placeholder="secret"/></div>
-            </div>
-          </details>
+          <p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem">Подключитесь через наш сервер — работает из любой сети, без настроек.</p>
           <div class="connect-tabs"><button class="tab-btn active" data-tab="create">Создать комнату</button><button class="tab-btn" data-tab="join">Присоединиться</button></div>
           <div class="tab-content active" id="tabCreate">
             <p class="tab-desc">Создайте комнату и отправьте код другу.</p>
@@ -156,6 +157,11 @@
             <div class="connected-peers" id="connectedPeersJoin"></div>
           </div>
           <div class="error-msg" id="connectError" style="display:none"></div>
+          <!-- Hidden: TURN config auto-fetched from server -->
+          <input type="hidden" id="signalingServer" value=""/>
+          <input type="hidden" id="turnServerUrl" value=""/>
+          <input type="hidden" id="turnServerUser" value=""/>
+          <input type="hidden" id="turnServerPass" value=""/>
         </div>
       </div>
     </div>
@@ -188,6 +194,16 @@
         </div>
       </div>
     </div>
+    <!-- Rename Source Modal -->
+    <div class="modal-overlay" id="renameModal" style="display:none">
+      <div class="modal glass" style="max-width:360px">
+        <div class="modal-header"><h2>Переименовать источник</h2><button class="btn-icon" id="btnCloseRenameModal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Имя источника</label><input type="text" id="renameInput" maxlength="60" style="width:100%;padding:6px 10px;border-radius:var(--r-sm);border:1.5px solid var(--glass-border);background:rgba(127,127,127,.08);color:var(--text);font-size:13px"/></div>
+          <button class="btn btn-accent block" id="btnConfirmRename">Сохранить</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Add Friend Modal -->
     <div class="modal-overlay" id="addFriendModal" style="display:none">
@@ -201,10 +217,6 @@
           <div class="form-group"><label>Код или ник</label><input type="text" id="friendAddCode" placeholder="ABCD-1234 или @nickname" maxlength="32"/></div>
           <div class="form-group"><label>Сообщение (необязательно)</label><input type="text" id="friendAddMessage" placeholder="Привет, давай стримить вместе!" maxlength="120"/></div>
           <button class="btn btn-accent block" id="btnFriendAddSend">Отправить заявку</button>
-          <div class="dev-zone">
-            <div class="dev-zone-label">Dev-зона (без сервера)</div>
-            <button class="btn block" id="btnFriendAddDev">Добавить локально (для теста чата)</button>
-          </div>
         </div>
       </div>
     </div>

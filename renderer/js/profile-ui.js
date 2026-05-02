@@ -15,6 +15,9 @@
   const _listeners = new Set();
   const $ = (id) => document.getElementById(id);
 
+  // Preset avatars (emoji-based, rendered large)
+  const _PRESET_AVATARS = ['🐱','🐶','🦊','🐻','🐼','🦁','🐸','🦉','🐺','🐲','🦄','🐧','🎭','🎨','🎬','🎵','👾','🤖','🚀','⚡','🔥','💎','🌟','🍀'];
+
   function _emit() { for (const cb of _listeners) { try { cb(_profile); } catch (e) {} } }
 
   async function _refresh() {
@@ -231,12 +234,26 @@
     card.innerHTML = `
       <div class="profile-row">
         <div class="profile-avatar" id="profileAvatar">${_profile.avatar
-          ? `<img src="${_escape(_profile.avatar)}" alt=""/>`
-          : initials}</div>
+          ? (_profile.avatar.startsWith('http') || _profile.avatar.startsWith('/') || _profile.avatar.startsWith('avatar:')
+            ? `<img src="${_escape(_profile.avatar)}" alt=""/>`
+            : _escape(_profile.avatar))
+          : `<span class="avatar-initials">${initials}</span>`}</div>
         <div class="profile-meta">
           <div class="profile-nick"><input type="text" id="profileNickInput" value="${_escape(_profile.nickname || '')}" maxlength="32" placeholder="Ник"/></div>
           <div class="profile-email">${_profile.email ? _escape(_profile.email) : '<span class="profile-muted">(локальный аккаунт)</span>'}</div>
           <div class="profile-id">ID: ${_escape(_profile.serverId || _profile.id || '—')}</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Аватар</label>
+        <div class="avatar-picker" id="avatarPicker">
+          <div class="avatar-presets" id="avatarPresets">
+            ${_PRESET_AVATARS.map(a => `<button class="avatar-preset${_profile.avatar===a?' selected':''}" data-avatar="${a}">${a}</button>`).join('')}
+          </div>
+          <div class="avatar-custom">
+            <label class="btn" style="font-size:0.8rem;padding:0.3rem 0.6rem;cursor:pointer">Выбрать файл<input type="file" id="avatarFileInput" accept="image/jpeg,image/png,image/gif,image/webp" style="display:none"/></label>
+            ${_profile.avatar && !_PRESET_AVATARS.includes(_profile.avatar) ? '<button class="btn" id="avatarRemoveBtn" style="font-size:0.75rem;padding:0.2rem 0.5rem;color:var(--danger)">Удалить</button>' : ''}
+          </div>
         </div>
       </div>
       <div class="form-group">
@@ -254,7 +271,8 @@
       </div>
       <div class="profile-actions">
         ${_profile.registered
-          ? `<button class="btn" id="profileBtnOpenWeb">Открыть профиль на сайте</button>
+          ? `<button class="btn" id="profileBtnChangePassword" style="font-size:0.8rem">Сменить пароль</button>
+             <button class="btn" id="profileBtnOpenWeb">Открыть профиль на сайте</button>
              <button class="btn" id="profileBtnLogout">Выйти</button>`
           : `<button class="btn btn-accent" id="profileBtnSignup">Регистрация</button>
              <button class="btn" id="profileBtnLogin">Войти</button>
@@ -289,6 +307,55 @@
       window.electronAPI.profileUpdate({ consents: { analytics: cAna.checked } }).then(() => _refresh());
     });
 
+    // Avatar preset buttons
+    const presetContainer = $('avatarPresets');
+    if (presetContainer) {
+      presetContainer.addEventListener('click', (e) => {
+        const btn = e.target.closest('.avatar-preset');
+        if (!btn) return;
+        const emoji = btn.dataset.avatar;
+        window.electronAPI.profileUpdate({ avatar: emoji }).then(() => {
+          try { window.SBSounds && window.SBSounds.play('click'); } catch (_) {}
+          _refresh();
+        });
+      });
+    }
+
+    // Avatar file upload
+    const fileInput = $('avatarFileInput');
+    if (fileInput) {
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+        if (file.size > 2 * 1024 * 1024) { _toast('Файл слишком большой (макс. 2 МБ)'); return; }
+        if (!/^image\/(jpeg|png|gif|webp)$/.test(file.type)) { _toast('Только JPG, PNG, GIF, WebP'); return; }
+        _toast('Загрузка аватара...');
+        try {
+          const buf = await file.arrayBuffer();
+          const u8 = new Uint8Array(buf);
+          console.log('[SBProfile] file read:', file.name, file.type, u8.length, 'bytes');
+          const payload = { buffer: u8, name: file.name, type: file.type, size: file.size };
+          console.log('[SBProfile] sending payload, keys:', Object.keys(payload), 'buffer type:', u8.constructor.name);
+          const result = await window.electronAPI.profileUploadAvatar(payload);
+          console.log('[SBProfile] upload result:', JSON.stringify(result));
+          if (result && result.error) { _toast('Ошибка: ' + result.error); return; }
+          if (result && result.avatarUrl) { _toast('Аватар обновлён'); await _refresh(); }
+          else { _toast('Ошибка загрузки аватара'); }
+        } catch (err) {
+          console.warn('[SBProfile] avatar upload error:', err);
+          _toast('Ошибка: ' + (err.message || err));
+        }
+      });
+    }
+
+    // Avatar remove button
+    const removeBtn = $('avatarRemoveBtn');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', () => {
+        window.electronAPI.profileUpdate({ avatar: '' }).then(() => _refresh());
+      });
+    }
+
     const bSignup = $('profileBtnSignup');
     bSignup && bSignup.addEventListener('click', () => _showInlineForm('register'));
     const bLogin = $('profileBtnLogin');
@@ -297,6 +364,10 @@
     bSite && bSite.addEventListener('click', () => window.electronAPI.profileOpenLogin());
     const bWeb = $('profileBtnOpenWeb');
     bWeb && bWeb.addEventListener('click', () => window.electronAPI.profileOpenPage());
+
+    const bChangePwd = $('profileBtnChangePassword');
+    bChangePwd && bChangePwd.addEventListener('click', () => _showChangePasswordForm());
+
     const bLogout = $('profileBtnLogout');
     bLogout && bLogout.addEventListener('click', async () => {
       if (!confirm('Выйти из аккаунта? Локальные настройки и друзья останутся.')) return;
@@ -330,10 +401,41 @@
     } catch (e) { el.textContent = ''; }
   }
 
+  async function _showChangePasswordForm() {
+    const currentPwd = prompt('Текущий пароль:');
+    if (!currentPwd) return;
+    const newPwd = prompt('Новый пароль (минимум 8 символов):');
+    if (!newPwd) return;
+    if (newPwd.length < 8) { _toast('Пароль должен быть минимум 8 символов'); return; }
+    try {
+      const result = await window.electronAPI.profileChangePassword(currentPwd, newPwd);
+      if (result && result.error) { _toast('Ошибка: ' + result.error); }
+      else { _toast('Пароль изменён!'); }
+    } catch (err) {
+      _toast('Ошибка: ' + (err.message || err));
+    }
+  }
+
   function _escape(s) {
     return String(s || '').replace(/[&<>"']/g, c => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[c]);
+  }
+
+  function _toast(text) {
+    // Use app.js msg() if available (exported to window)
+    if (typeof window.msg === 'function') { window.msg(text); return; }
+    // Fallback: create own notification
+    const container = document.getElementById('notifications');
+    if (container) {
+      const e = document.createElement('div');
+      e.className = 'notification info';
+      e.textContent = text;
+      container.appendChild(e);
+      setTimeout(() => { e.style.opacity = '0'; e.style.transition = '.4s'; setTimeout(() => e.remove(), 400); }, 2500);
+      return;
+    }
+    console.log('[SBProfile]', text);
   }
 
   // ─── Status registry (shared with friends-ui) ───

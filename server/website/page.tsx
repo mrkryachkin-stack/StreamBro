@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
 
@@ -39,79 +39,6 @@ const CHANGES: Record<string, string[]> = {
   ],
 };
 
-/* ═══════════════════════════════════════════════════════════════
-   CURSOR COMPONENT
-   ═══════════════════════════════════════════════════════════════ */
-function GoldCursor() {
-  const cursorRef = useRef<HTMLDivElement>(null);
-  const trailRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const cursor = cursorRef.current;
-    const trail = trailRef.current;
-    if (!cursor || !trail) return;
-
-    let mx = 0, my = 0, tx = 0, ty = 0;
-    let raf: number;
-
-    const onMove = (e: MouseEvent) => {
-      mx = e.clientX;
-      my = e.clientY;
-      cursor.style.left = mx + "px";
-      cursor.style.top = my + "px";
-    };
-
-    const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-    const tick = () => {
-      tx = lerp(tx, mx, 0.1);
-      ty = lerp(ty, my, 0.1);
-      trail.style.left = tx + "px";
-      trail.style.top = ty + "px";
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-
-    const onDown = () => cursor.classList.add("cursor-click");
-    const onUp = () => cursor.classList.remove("cursor-click");
-
-    const onEnter = (e: MouseEvent) => {
-      const el = e.target as HTMLElement;
-      if (el.closest("a,button,[role=button]")) {
-        cursor.classList.add("cursor-hover");
-        trail.style.opacity = "0";
-      }
-    };
-    const onLeave = (e: MouseEvent) => {
-      const el = e.target as HTMLElement;
-      if (el.closest("a,button,[role=button]")) {
-        cursor.classList.remove("cursor-hover");
-        trail.style.opacity = "0.6";
-      }
-    };
-
-    document.addEventListener("mousemove", onMove, { passive: true });
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("mouseup", onUp);
-    document.addEventListener("mouseover", onEnter);
-    document.addEventListener("mouseout", onLeave);
-
-    return () => {
-      cancelAnimationFrame(raf);
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("mouseup", onUp);
-      document.removeEventListener("mouseover", onEnter);
-      document.removeEventListener("mouseout", onLeave);
-    };
-  }, []);
-
-  return (
-    <>
-      <div ref={cursorRef} className="sb-cursor" />
-      <div ref={trailRef} className="sb-cursor-trail" />
-    </>
-  );
-}
 
 /* ═══════════════════════════════════════════════════════════════
    SCROLL REVEAL HOOK
@@ -759,7 +686,6 @@ export default function HomePage() {
 
   return (
     <main>
-      <GoldCursor />
       <ChangesModal open={showChanges} onClose={() => setShowChanges(false)} />
       <Navbar />
       <Hero onChangelog={() => setShowChanges(true)} downloadUrl={downloadUrl} />

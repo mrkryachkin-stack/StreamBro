@@ -155,9 +155,8 @@
               </button>` : ''}
             </div>
           </div>
-          <div class="friend-notif-row">
-            <span class="friend-notif-label">🔊 Звук</span>
-            <div class="friend-slider ${soundOn ? 'on' : 'off'}" data-action="toggle-sound"><span class="friend-slider-track"><span class="friend-slider-thumb"></span></span></div>
+          <div class="friend-notif-row" style="display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0.6rem 0.5rem">
+            <button type="button" class="friend-notif-btn" data-action="toggle-sound" style="cursor:pointer;background:${soundOn ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'};color:${soundOn ? '#86efac' : '#fca5a5'};border:1px solid ${soundOn ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)'};border-radius:5px;padding:0.25rem 0.6rem;font-size:0.72rem;font-weight:600">${soundOn ? '🔊 Звук: ВКЛ' : '🔇 Звук: ВЫКЛ'}</button>
           </div>
         </div>`;
     }).join('');
@@ -181,13 +180,22 @@
         await window.electronAPI.friendsRemove(fid);
         await refresh();
       });
-      const soundSlider = row.querySelector('[data-action="toggle-sound"]');
-      soundSlider && soundSlider.addEventListener('click', (e) => {
+      const soundBtn = row.querySelector('[data-action="toggle-sound"]');
+      soundBtn && soundBtn.addEventListener('click', (e) => {
+        e.preventDefault();
         e.stopPropagation();
         const newVal = !_isNotifSoundOn(fid);
         _setPerFriend(fid, 'sound', newVal);
-        soundSlider.classList.toggle('on', newVal);
-        soundSlider.classList.toggle('off', !newVal);
+        soundBtn.textContent = newVal ? '🔊 Звук: ВКЛ' : '🔇 Звук: ВЫКЛ';
+        if (newVal) {
+          soundBtn.style.background = 'rgba(34,197,94,0.18)';
+          soundBtn.style.color = '#86efac';
+          soundBtn.style.borderColor = 'rgba(34,197,94,0.35)';
+        } else {
+          soundBtn.style.background = 'rgba(239,68,68,0.18)';
+          soundBtn.style.color = '#fca5a5';
+          soundBtn.style.borderColor = 'rgba(239,68,68,0.35)';
+        }
       });
     });
   }
@@ -558,39 +566,53 @@
     });
   }
 
-  // ─── Global notification sliders (top of friends panel) ───
+  // ─── Global notification toggle buttons (top of friends panel) ───
+  function _styleNotifBtn(btn, on) {
+    if (!btn) return;
+    if (on) {
+      btn.style.background = 'rgba(34,197,94,0.18)';
+      btn.style.color = '#86efac';
+      btn.style.borderColor = 'rgba(34,197,94,0.35)';
+    } else {
+      btn.style.background = 'rgba(239,68,68,0.18)';
+      btn.style.color = '#fca5a5';
+      btn.style.borderColor = 'rgba(239,68,68,0.35)';
+    }
+  }
   function _wireGlobalNotifSliders() {
-    const soundSlider = $('globalNotifSound');
-    const badgeSlider = $('globalNotifBadge');
+    const soundBtn = $('globalNotifSound');
+    const badgeBtn = $('globalNotifBadge');
     const n = _getGlobalNotif();
 
-    if (soundSlider) {
-      soundSlider.classList.toggle('on', n.sound !== false);
-      soundSlider.classList.toggle('off', n.sound === false);
-      // Remove any prior listener by replacing the node
-      const fresh = soundSlider.cloneNode(true);
-      soundSlider.parentNode.replaceChild(fresh, soundSlider);
+    if (soundBtn) {
+      const isOn = n.sound !== false;
+      soundBtn.textContent = isOn ? '🔊 Звук: ВКЛ' : '🔇 Звук: ВЫКЛ';
+      _styleNotifBtn(soundBtn, isOn);
+      // Replace to clear any prior listeners
+      const fresh = soundBtn.cloneNode(true);
+      soundBtn.parentNode.replaceChild(fresh, soundBtn);
       fresh.addEventListener('click', (e) => {
         e.preventDefault(); e.stopPropagation();
         const cur = _getGlobalNotif();
-        const newVal = cur.sound === false; // if was off, turn on
+        const newVal = cur.sound === false; // toggle
         _setGlobalNotif('sound', newVal);
-        fresh.classList.toggle('on', newVal);
-        fresh.classList.toggle('off', !newVal);
+        fresh.textContent = newVal ? '🔊 Звук: ВКЛ' : '🔇 Звук: ВЫКЛ';
+        _styleNotifBtn(fresh, newVal);
       });
     }
-    if (badgeSlider) {
-      badgeSlider.classList.toggle('on', n.badge !== false);
-      badgeSlider.classList.toggle('off', n.badge === false);
-      const fresh = badgeSlider.cloneNode(true);
-      badgeSlider.parentNode.replaceChild(fresh, badgeSlider);
+    if (badgeBtn) {
+      const isOn = n.badge !== false;
+      badgeBtn.textContent = isOn ? '🔔 Бейдж: ВКЛ' : '🔕 Бейдж: ВЫКЛ';
+      _styleNotifBtn(badgeBtn, isOn);
+      const fresh = badgeBtn.cloneNode(true);
+      badgeBtn.parentNode.replaceChild(fresh, badgeBtn);
       fresh.addEventListener('click', (e) => {
         e.preventDefault(); e.stopPropagation();
         const cur = _getGlobalNotif();
         const newVal = cur.badge === false;
         _setGlobalNotif('badge', newVal);
-        fresh.classList.toggle('on', newVal);
-        fresh.classList.toggle('off', !newVal);
+        fresh.textContent = newVal ? '🔔 Бейдж: ВКЛ' : '🔕 Бейдж: ВЫКЛ';
+        _styleNotifBtn(fresh, newVal);
         _updateBadge();
       });
     }

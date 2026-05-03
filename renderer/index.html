@@ -101,11 +101,9 @@
                 Добавить друга
               </button>
             </div>
-            <div class="friends-notif-toggles" style="display:flex;gap:0.8rem;padding:0.4rem 0;font-size:0.78rem;color:var(--text2);align-items:center">
-              <span>🔊</span>
-              <div class="friend-slider on" id="globalNotifSound" style="cursor:pointer;display:inline-flex;align-items:center"><span class="friend-slider-track"><span class="friend-slider-thumb"></span></span></div>
-              <span style="margin-left:0.3rem">🔔</span>
-              <div class="friend-slider on" id="globalNotifBadge" style="cursor:pointer;display:inline-flex;align-items:center"><span class="friend-slider-track"><span class="friend-slider-thumb"></span></span></div>
+            <div class="friends-notif-toggles" style="display:flex;gap:0.5rem;padding:0.5rem 0;font-size:0.78rem;color:var(--text2);align-items:center;flex-wrap:wrap">
+              <button type="button" class="notif-toggle-btn on" id="globalNotifSound" style="cursor:pointer;background:rgba(34,197,94,0.18);color:#86efac;border:1px solid rgba(34,197,94,0.35);border-radius:6px;padding:0.35rem 0.7rem;font-size:0.78rem;font-weight:600">🔊 Звук: ВКЛ</button>
+              <button type="button" class="notif-toggle-btn on" id="globalNotifBadge" style="cursor:pointer;background:rgba(34,197,94,0.18);color:#86efac;border:1px solid rgba(34,197,94,0.35);border-radius:6px;padding:0.35rem 0.7rem;font-size:0.78rem;font-weight:600">🔔 Бейдж: ВКЛ</button>
             </div>
             <div class="friends-list" id="friendsList"></div>
           </div>

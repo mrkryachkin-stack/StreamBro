@@ -46,6 +46,9 @@ const DEFAULT_SETTINGS = {
   // per-source state by name (we cannot rely on stable IDs across restarts):
   fxStateByName: {},
 
+  // Onboarding wizard — shown once on first launch
+  onboardingComplete: false,
+
   // ─── Profile / account (1.1.0) ───
   // Persistent identity. Without server we keep a local "dev" profile so the
   // user can use the app right away. When the server side lands, `serverId` /

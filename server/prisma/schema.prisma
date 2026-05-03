@@ -23,6 +23,8 @@ model User {
   resetTokenExp DateTime?
   lastLoginAt   DateTime?
   banned        Boolean   @default(false)
+  totpSecret    String?
+  totpEnabled   Boolean   @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 

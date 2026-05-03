@@ -38,7 +38,7 @@ type Room = {
   members: { userId: string; role: string; user: { id: string; username: string; displayName: string; avatarUrl: string | null } }[];
 };
 
-const TABS = ["stats", "users", "rooms", "bugs", "feedback", "announce"] as const;
+const TABS = ["stats", "users", "rooms", "bugs", "feedback", "announce", "security"] as const;
 type Tab = (typeof TABS)[number];
 
 // Authenticated fetch — adds ADMIN_SECRET from sessionStorage if available
@@ -167,6 +167,112 @@ function FeedbackSection() {
         ) : (
           <div style={{ color: "#64748b", fontSize: "0.85rem", padding: "2rem 0" }}>{"Выберите пользователя слева"}</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function TwoFactorSection() {
+  const [status2fa, setStatus2fa] = useState<boolean | null>(null);
+  const [qrCode, setQrCode] = useState<string | null>(null);
+  const [secret, setSecret] = useState<string | null>(null);
+  const [token, setToken] = useState("");
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    adminFetch("/api/admin/2fa/status")
+      .then(r => r.json())
+      .then(d => setStatus2fa(d.enabled))
+      .catch(() => setStatus2fa(false));
+  }, []);
+
+  const setup = async () => {
+    const r = await adminFetch("/api/admin/2fa/setup", { method: "POST" });
+    const d = await r.json();
+    if (d.qrCode) { setQrCode(d.qrCode); setSecret(d.secret); }
+    else setMsg("❌ " + (d.error || "Ошибка"));
+  };
+
+  const verify = async () => {
+    const r = await adminFetch("/api/admin/2fa/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const d = await r.json();
+    if (d.ok) { setMsg("✅ 2FA включена!"); setStatus2fa(true); setQrCode(null); setToken(""); }
+    else setMsg("❌ " + (d.error || "Ошибка"));
+  };
+
+  const disable = async () => {
+    const t = prompt("Введи TOTP код для отключения 2FA:");
+    if (!t) return;
+    const r = await adminFetch("/api/admin/2fa/disable", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: t }),
+    });
+    const d = await r.json();
+    if (d.ok) { setMsg("2FA отключена"); setStatus2fa(false); }
+    else setMsg("❌ " + (d.error || "Ошибка"));
+  };
+
+  if (status2fa === null) return <div style={{ color: "#94a3b8" }}>{"Загрузка..."}</div>;
+
+  return (
+    <div style={{ maxWidth: 480, margin: "0 auto" }}>
+      <h3 style={{ color: "#8b5cf6", marginTop: 0 }}>{"Двухфакторная аутентификация"}</h3>
+      <div style={{ background: "#1a1a2e", padding: 24, borderRadius: 12, border: "1px solid #333" }}>
+        <p style={{ margin: "0 0 16px" }}>
+          {"Статус: "}
+          <strong style={{ color: status2fa ? "#10b981" : "#ef4444" }}>
+            {status2fa ? "✅ Включена" : "❌ Отключена"}
+          </strong>
+        </p>
+        {!status2fa && !qrCode && (
+          <button
+            onClick={setup}
+            style={{ background: "#8b5cf6", color: "#fff", border: "none", padding: "8px 20px", borderRadius: 8, cursor: "pointer", fontWeight: 600 }}
+          >
+            {"Настроить 2FA"}
+          </button>
+        )}
+        {qrCode && (
+          <div>
+            <p style={{ color: "#a0aec0", margin: "0 0 8px" }}>{"Отсканируй QR в Google Authenticator:"}</p>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={qrCode} alt="QR Code" style={{ width: 200, height: 200, display: "block", margin: "0 0 12px" }} />
+            <p style={{ fontSize: 12, color: "#718096", margin: "0 0 12px" }}>
+              {"Или введи вручную: "}
+              <code style={{ background: "#2d3748", padding: "2px 6px", borderRadius: 4, fontSize: 11 }}>{secret}</code>
+            </p>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                value={token}
+                onChange={e => setToken(e.target.value)}
+                placeholder="Код из приложения"
+                onKeyDown={e => { if (e.key === "Enter") verify(); }}
+                style={{ background: "#2d3748", border: "1px solid #4a5568", color: "#fff", padding: "8px 12px", borderRadius: 8, width: 180 }}
+              />
+              <button
+                onClick={verify}
+                disabled={!token.trim()}
+                style={{ background: "#10b981", color: "#fff", border: "none", padding: "8px 16px", borderRadius: 8, cursor: "pointer", fontWeight: 600, opacity: token.trim() ? 1 : 0.5 }}
+              >
+                {"Подтвердить"}
+              </button>
+            </div>
+          </div>
+        )}
+        {status2fa && (
+          <button
+            onClick={disable}
+            style={{ background: "#ef4444", color: "#fff", border: "none", padding: "8px 20px", borderRadius: 8, cursor: "pointer", fontWeight: 600, marginTop: 8 }}
+          >
+            {"Отключить 2FA"}
+          </button>
+        )}
+        {msg && <p style={{ color: msg.startsWith("❌") ? "#ef4444" : "#10b981", marginTop: 12, marginBottom: 0 }}>{msg}</p>}
       </div>
     </div>
   );
@@ -325,7 +431,7 @@ export default function AdminPage() {
                 color: activeTab === tab ? "#c4b5fd" : "#94a3b8", fontWeight: 600, fontSize: "0.85rem",
               }}
             >
-              {tab === "stats" ? "Статистика" : tab === "users" ? "Пользователи" : tab === "rooms" ? "Комнаты" : tab === "bugs" ? "Баг-репорты" : "Рассылка"}
+              {tab === "stats" ? "Статистика" : tab === "users" ? "Пользователи" : tab === "rooms" ? "Комнаты" : tab === "bugs" ? "Баг-репорты" : tab === "feedback" ? "Обратная связь" : tab === "security" ? "Безопасность" : "Рассылка"}
             </button>
           ))}
         </div>
@@ -481,6 +587,9 @@ export default function AdminPage() {
 
         {/* Feedback */}
         {activeTab === "feedback" && <FeedbackSection />}
+
+        {/* Security / 2FA */}
+        {activeTab === "security" && <TwoFactorSection />}
 
         {/* Announce */}
         {activeTab === "announce" && (

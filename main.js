@@ -10,6 +10,7 @@ const bugReporter = require('./modules/bug-reporter');
 const autoUpdater = require('./modules/auto-updater');
 const serverApi = require('./modules/server-api');
 const cloudSync = require('./modules/cloud-sync');
+const virtualCamera = require('./modules/virtual-camera');
 
 const IS_PACKAGED = app.isPackaged;
 
@@ -83,7 +84,6 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       webgl: true,
-      experimentalFeatures: true, // required for getDisplayMedia + captureStream
       spellcheck: false,
     },
     icon: path.join(__dirname, 'assets', IS_PACKAGED ? 'icon.ico' : 'icon.png'),
@@ -217,6 +217,8 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+  // Pass mainWindow to virtualCamera after it's created
+  virtualCamera.init(mainWindow, getFFmpegPath);
 
   // macOS deep link arrives via 'open-url'; on Windows it arrives via
   // process.argv on second-instance.
@@ -408,6 +410,26 @@ function getFFmpegPath() {
   }
 }
 
+// ─── Hardware encoder detection ───
+// Checks FFmpeg for GPU-accelerated encoders: NVENC (NVIDIA), AMF (AMD), QSV (Intel).
+// Falls back to libx264 (CPU) if none found or detection times out.
+async function detectHardwareEncoder(ffmpegPath) {
+  const encoders = ['h264_nvenc', 'h264_amf', 'h264_qsv'];
+  for (const enc of encoders) {
+    const result = await new Promise(resolve => {
+      const proc = spawn(ffmpegPath, ['-hide_banner', '-encoders'], { windowsHide: true });
+      let out = '';
+      proc.stdout && proc.stdout.on('data', d => out += d.toString());
+      proc.stderr && proc.stderr.on('data', d => out += d.toString());
+      proc.on('close', () => resolve(out.includes(enc)));
+      proc.on('error', () => resolve(false));
+      setTimeout(() => { try { proc.kill(); } catch {} resolve(false); }, 5000);
+    });
+    if (result) return enc;
+  }
+  return 'libx264';
+}
+
 function stopFFmpegRec() {
   if (ffmpegRecProcess) {
     try { ffmpegRecProcess.stdin.write('q'); ffmpegRecProcess.stdin.end(); } catch(e) {}
@@ -517,6 +539,17 @@ ipcMain.handle('open-external', (_event, url) => {
 
 ipcMain.handle('get-ffmpeg-path', () => { return getFFmpegPath(); });
 
+ipcMain.handle('detect-hw-encoder', async () => {
+  try {
+    const ffmpegPath = getFFmpegPath();
+    if (!ffmpegPath || !fs.existsSync(ffmpegPath)) return { encoder: 'libx264' };
+    const encoder = await detectHardwareEncoder(ffmpegPath);
+    return { encoder };
+  } catch (e) {
+    return { encoder: 'libx264' };
+  }
+});
+
 // ─── Settings IPC ───
 
 ipcMain.handle('settings-load', () => {
@@ -622,8 +655,12 @@ ipcMain.handle('write-rec-chunk', (event, { chunk }) => {
 // Renderer pipes WebM chunks (canvas + mixed audio) → ffmpeg stdin → RTMP
 
 ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
-  // opts: { rtmpUrl, streamKey, bitrate, resolution, fps, webcodecs }
+  // opts: { rtmpUrl, streamKey, bitrate, resolution, fps, webcodecs, encoder }
   if (!opts || !opts.rtmpUrl) return { success: false, error: 'Missing RTMP URL' };
+
+  // Validate encoder — only allow known safe values, fall back to libx264
+  const ALLOWED_ENCODERS = ['libx264', 'h264_nvenc', 'h264_amf', 'h264_qsv'];
+  const encoder = ALLOWED_ENCODERS.includes(opts.encoder) ? opts.encoder : 'libx264';
   // Get encrypted key from settings if streamKey not provided directly
   let key = opts.streamKey;
   if (!key) {
@@ -667,6 +704,13 @@ ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
     if (!IS_PACKAGED) console.log('[FFmpegStream] WebCodecs mode: copy codec (no re-encode)');
   } else {
     // Legacy path: renderer sends WebM (VP9/Opus), FFmpeg re-encodes to H.264/AAC
+    // encoder may be a GPU accelerated codec (h264_nvenc/h264_amf/h264_qsv) or libx264
+    const isGpuEncoder = encoder !== 'libx264';
+    const encoderPreset = encoder === 'h264_nvenc' ? 'p4'
+      : encoder === 'h264_qsv' ? 'veryfast'
+      : encoder === 'h264_amf' ? 'balanced'
+      : 'veryfast';
+
     args = [
       '-loglevel', 'level+info',
       '-hide_banner',
@@ -677,9 +721,9 @@ ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
       '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`,
       '-fps_mode', 'cfr',
       '-r', String(fps),
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-tune', 'zerolatency',
+      '-c:v', encoder,
+      '-preset', encoderPreset,
+      ...(isGpuEncoder ? [] : ['-tune', 'zerolatency']),
       '-profile:v', 'main',
       '-level', '4.1',
       '-b:v', `${bitrate}k`,
@@ -689,7 +733,7 @@ ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
       '-g', String(fps * 2),
       '-keyint_min', String(fps * 2),
       '-sc_threshold', '0',
-      '-x264-params', `nal-hrd=cbr:keyint=${fps * 2}:min-keyint=${fps * 2}:scenecut=0`,
+      ...(isGpuEncoder ? [] : ['-x264-params', `nal-hrd=cbr:keyint=${fps * 2}:min-keyint=${fps * 2}:scenecut=0`]),
       '-af', 'aresample=async=1000:first_pts=0',
       '-c:a', 'aac',
       '-b:a', '160k',
@@ -699,7 +743,7 @@ ipcMain.handle('start-ffmpeg-stream', (event, opts) => {
       '-flvflags', 'no_duration_filesize',
       fullUrl
     ];
-    if (!IS_PACKAGED) console.log('[FFmpegStream] Legacy mode: WebM re-encode to H.264');
+    if (!IS_PACKAGED) console.log(`[FFmpegStream] Legacy mode: WebM re-encode via ${encoder}`);
   }
 
   ffmpegStreamArgs = {

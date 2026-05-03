@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ffmpeg paths
   getFFmpegPath: () => ipcRenderer.invoke('get-ffmpeg-path'),
+  detectHwEncoder: () => ipcRenderer.invoke('detect-hw-encoder'),
   getVideosDir: () => ipcRenderer.invoke('get-videos-dir'),
 
   // local recording
@@ -130,4 +131,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updaterInstall:      () => ipcRenderer.invoke('updater-install'),
   updaterSetChannel:   (ch) => ipcRenderer.invoke('updater-set-channel', ch),
   onUpdateState:       (cb) => ipcRenderer.on('update-state', (_, data) => cb(data)),
+
+  // ─── Virtual Camera (1.3.0) ───
+  vcamListDevices:  () => ipcRenderer.invoke('vcam-list-devices'),
+  vcamStart:        (opts) => ipcRenderer.invoke('vcam-start', opts),
+  vcamStop:         () => ipcRenderer.invoke('vcam-stop'),
+  vcamStatus:       () => ipcRenderer.invoke('vcam-status'),
+  vcamWriteChunk:   (chunk) => ipcRenderer.invoke('vcam-write-chunk', chunk),
+  onVcamError:      (cb) => ipcRenderer.on('vcam-error', (_, msg) => cb(msg)),
+  onVcamStatus:     (cb) => ipcRenderer.on('vcam-status-change', (_, data) => cb(data)),
 });

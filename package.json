@@ -1,6 +1,6 @@
 {
   "name": "streambro",
-  "version": "1.2.8",
+  "version": "1.3.0",
   "description": "StreamBro — компактный профессиональный стриминг-композитор для Windows: сцены, источники, микшер, рамки, локальная запись и реальный RTMP на Twitch / YouTube / Kick / Custom. Оптимизация производительности, overlay canvas, FPS разделение в 1.2.",
   "main": "main.js",
   "scripts": {
@@ -8,14 +8,44 @@
     "start:dev": "electron .",
     "start:safe": "electron . --no-sandbox",
     "server": "node signaling-server/server.js",
-    "test": "node test/transform.test.js && node test/settings.test.js && node test/coscene.test.js && node test/profile.test.js && node test/friends.test.js && node test/sounds.test.js && node test/notif-toggle.test.js",
+    "test": "node test/transform.test.js && node test/settings.test.js && node test/coscene.test.js && node test/profile.test.js && node test/friends.test.js && node test/sounds.test.js && node test/notif-toggle.test.js && node test/e2e.test.js",
+    "release": "standard-version",
+    "release:minor": "standard-version --release-as minor",
+    "release:patch": "standard-version --release-as patch",
     "build": "electron-builder --win",
     "build:win": "electron-builder --win",
     "build:dir": "electron-builder --win --dir",
     "pack": "electron-builder --win --dir",
     "dist": "electron-builder --win nsis",
     "publish": "electron-builder --win --publish always",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "release": "standard-version",
+    "release:minor": "standard-version --release-as minor",
+    "release:patch": "standard-version --release-as patch"
+  },
+  "standard-version": {
+    "types": [
+      {
+        "type": "feat",
+        "section": "Added"
+      },
+      {
+        "type": "fix",
+        "section": "Fixed"
+      },
+      {
+        "type": "chore",
+        "section": "Changed"
+      },
+      {
+        "type": "docs",
+        "section": "Documentation"
+      },
+      {
+        "type": "perf",
+        "section": "Performance"
+      }
+    ]
   },
   "author": {
     "name": "StreamBro",
@@ -28,7 +58,7 @@
     "url": "local"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "electron": "^41.5.0",
     "electron-builder": "^25.0.0",
     "png-to-ico": "^3.0.1"
   },
@@ -43,12 +73,14 @@
     "appId": "com.streambro.app",
     "productName": "StreamBro",
     "asar": true,
+    "asarIntegrity": true,
+    "electronUpdaterCompatibility": ">=2.16",
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
       "node_modules/native-recorder-nodejs/**",
       "vendor/**",
       "assets/**"
-      ],
+    ],
     "directories": {
       "output": "dist",
       "buildResources": "build"

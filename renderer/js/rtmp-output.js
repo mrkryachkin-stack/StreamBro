@@ -48,6 +48,7 @@ class RTMPOutput {
     this._streamKey = '';
     this._streamResolution = '1280x720';
     this._streamFps = 30;
+    this._encoder = 'libx264';      // video encoder (libx264 / h264_nvenc / h264_amf / h264_qsv)
     this._streamStatus = 'offline';
     this._pendingTsPackets = [];    // buffer of MPEG-TS packets before first IPC
     this._audioSeq = 0;
@@ -86,6 +87,10 @@ class RTMPOutput {
   setBitrate(kbps) { this.bitrate = kbps; }
   setResolution(res) { this._streamResolution = res; }
   setFps(fps) { this._streamFps = fps; this.fps = fps; }
+  setEncoder(enc) {
+    const allowed = ['libx264', 'h264_nvenc', 'h264_amf', 'h264_qsv'];
+    this._encoder = allowed.includes(enc) ? enc : 'libx264';
+  }
   setCombinedStream(stream) { this.combinedStream = stream; }
 
   getUptime() {
@@ -405,6 +410,7 @@ class RTMPOutput {
         resolution: this._streamResolution,
         fps: this._streamFps,
         webcodecs: this._webCodecsSupported, // tell main we might send MPEG-TS
+        encoder: this._encoder,              // GPU or CPU video encoder
       });
       if (!result || !result.success) {
         if (this.onError) this.onError(result && result.error ? result.error : 'Ошибка запуска FFmpeg');

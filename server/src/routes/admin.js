@@ -1,5 +1,7 @@
 const express = require("express");
 const router = express.Router();
+const speakeasy = require("speakeasy");
+const qrcode = require("qrcode");
 const { authMiddleware, adminMiddleware } = require("../middleware/auth");
 
 // ─── POST /api/admin/setup ────────────────────────────────
@@ -476,6 +478,107 @@ router.post("/feedback/reply", authMiddleware, adminMiddleware, async (req, res)
   } catch (err) {
     console.error("[ADMIN] Feedback reply error:", err);
     res.status(500).json({ error: "Ошибка отправки ответа" });
+  }
+});
+
+// ─── POST /api/admin/2fa/setup ────────────────────────────
+// Generate TOTP secret and QR code (does not enable 2FA yet)
+router.post("/2fa/setup", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const secret = speakeasy.generateSecret({
+      name: `StreamBro Admin (${req.user.username})`,
+      issuer: "StreamBro",
+      length: 20,
+    });
+
+    // Store secret temporarily (not enabled yet, pending verify)
+    await req.prisma.user.update({
+      where: { id: req.user.id },
+      data: { totpSecret: secret.base32 },
+    });
+
+    const qrDataUrl = await qrcode.toDataURL(secret.otpauth_url);
+
+    res.json({
+      secret: secret.base32,
+      qrCode: qrDataUrl,
+      otpauthUrl: secret.otpauth_url,
+    });
+  } catch (err) {
+    console.error("[2FA] Setup error:", err);
+    res.status(500).json({ error: "Ошибка настройки 2FA" });
+  }
+});
+
+// ─── POST /api/admin/2fa/verify ──────────────────────────
+// Verify TOTP code and enable 2FA
+router.post("/2fa/verify", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: "Token required" });
+
+    const user = await req.prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user?.totpSecret) return res.status(400).json({ error: "2FA не настроена" });
+
+    const verified = speakeasy.totp.verify({
+      secret: user.totpSecret,
+      encoding: "base32",
+      token: token.replace(/\s/g, ""),
+      window: 2,
+    });
+
+    if (!verified) return res.status(400).json({ error: "Неверный код" });
+
+    await req.prisma.user.update({
+      where: { id: req.user.id },
+      data: { totpEnabled: true },
+    });
+
+    res.json({ ok: true, message: "2FA успешно включена" });
+  } catch (err) {
+    console.error("[2FA] Verify error:", err);
+    res.status(500).json({ error: "Ошибка верификации" });
+  }
+});
+
+// ─── POST /api/admin/2fa/disable ─────────────────────────
+// Disable 2FA (requires TOTP code if currently enabled)
+router.post("/2fa/disable", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { token } = req.body;
+    const user = await req.prisma.user.findUnique({ where: { id: req.user.id } });
+
+    if (user?.totpEnabled) {
+      if (!token) return res.status(400).json({ error: "Нужен TOTP код для отключения" });
+      const verified = speakeasy.totp.verify({
+        secret: user.totpSecret,
+        encoding: "base32",
+        token: token.replace(/\s/g, ""),
+        window: 2,
+      });
+      if (!verified) return res.status(400).json({ error: "Неверный код" });
+    }
+
+    await req.prisma.user.update({
+      where: { id: req.user.id },
+      data: { totpEnabled: false, totpSecret: null },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[2FA] Disable error:", err);
+    res.status(500).json({ error: "Ошибка" });
+  }
+});
+
+// ─── GET /api/admin/2fa/status ───────────────────────────
+// Check if 2FA is currently enabled for this admin
+router.get("/2fa/status", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const user = await req.prisma.user.findUnique({ where: { id: req.user.id } });
+    res.json({ enabled: user?.totpEnabled || false });
+  } catch (err) {
+    res.status(500).json({ error: "Ошибка" });
   }
 });
 

@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  backend-staging:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streambro-backend-staging
+    restart: unless-stopped
+    ports:
+      - "3011:3001"
+    environment:
+      - NODE_ENV=staging
+      - DATABASE_URL=postgresql://postgres:${STAGING_DB_PASSWORD:-changeme}@postgres-staging:5432/streambro_staging
+      - JWT_SECRET=${STAGING_JWT_SECRET:-staging-dev-secret}
+      - ADMIN_SECRET=${STAGING_ADMIN_SECRET:-staging-admin}
+      - FRONTEND_URL=${STAGING_FRONTEND_URL:-https://staging.streambro.ru}
+      - COOKIE_DOMAIN=${STAGING_COOKIE_DOMAIN:-staging.streambro.ru}
+      - PORT=3001
+    depends_on:
+      postgres-staging:
+        condition: service_healthy
+
+  postgres-staging:
+    image: postgres:16-alpine
+    container_name: streambro-postgres-staging
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=streambro_staging
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${STAGING_DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_staging_data:
+    name: streambro_staging_postgres

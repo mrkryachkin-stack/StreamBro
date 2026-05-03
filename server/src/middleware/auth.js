@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const speakeasy = require("speakeasy");
 
 // CSRF protection: verify Origin/Referer for state-changing cookie-auth requests
 // Desktop app uses Bearer token → skipped. Web dashboard uses cookie → checked.
@@ -65,4 +66,42 @@ function adminMiddleware(req, res, next) {
   next();
 }
 
-module.exports = { authMiddleware, adminMiddleware, csrfMiddleware };
+async function admin2faMiddleware(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+  // ADMIN_SECRET bypass — skip 2FA check for static secret auth
+  const authHeader = req.headers.authorization?.replace("Bearer ", "");
+  const secret = process.env.ADMIN_SECRET;
+  if (secret && authHeader === secret) return next();
+
+  try {
+    const user = await req.prisma.user.findUnique({ where: { id: req.user.id } });
+
+    // If 2FA not enabled — allow
+    if (!user || !user.totpEnabled) return next();
+
+    // Check TOTP token from header
+    const totpToken = req.headers["x-totp-token"];
+    if (!totpToken) {
+      return res.status(403).json({ error: "2FA required", require2fa: true });
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret: user.totpSecret,
+      encoding: "base32",
+      token: totpToken.replace(/\s/g, ""),
+      window: 2,
+    });
+
+    if (!verified) {
+      return res.status(403).json({ error: "Invalid 2FA token", require2fa: true });
+    }
+
+    next();
+  } catch (err) {
+    console.error("[2FA] Middleware error:", err);
+    res.status(500).json({ error: "Ошибка проверки 2FA" });
+  }
+}
+
+module.exports = { authMiddleware, adminMiddleware, csrfMiddleware, admin2faMiddleware };

@@ -72,7 +72,7 @@
             <div class="form-group"><label>Ключ стрима <span class="hint-toggle" data-hint="Уникальный ключ для трансляции. Берётся в настройках платформы (Twitch Dashboard, Kick Creator Dashboard). Хранится зашифрованным.">?</span></label><div class="input-row"><input type="password" id="streamKey" placeholder="live_xxxxxxxxxxxxx"/><button class="btn-icon sm" id="btnToggleKeyVisibility" title="Показать/скрыть"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button></div></div>
             <div class="form-group" id="customServerGroup" style="display:none"><label>RTMP сервер</label><input type="text" id="customServer" placeholder="rtmp://ваш-сервер.com/live/"/></div>
             <div class="form-group"><label>Разрешение стрима <span class="hint-toggle" data-hint="Размер кадра видео на выходе. 1280x720 (HD) — оптимально для Twitch и Kick. 1920x1080 — для YouTube и мощных ПК.">?</span></label><select id="streamResolution"><option value="3840x2160">3840x2160 (4K)</option><option value="2560x1440">2560x1440 (2K)</option><option value="1920x1080">1920x1080 (Full HD)</option><option value="1280x720" selected>1280x720 (HD)</option><option value="854x480">854x480 (SD)</option></select></div>
-            <div class="form-group"><label>Битрейт (кбит/с) <span class="hint-toggle" data-hint="Объём видеоданных в секунду. Выше = чётче, но нужна хорошая сеть. 6000 — стандарт для 720p/1080p. Kick free: макс. 4500.">?</span></label><input type="number" id="streamBitrateInput" value="6000" min="1000" max="30000" step="500"/></div>
+            <div class="form-group"><label>Битрейт (кбит/с) <span class="hint-toggle" data-hint="Объём видеоданных в секунду. Выше = чётче, но нужна хорошая сеть. 6000 — стандарт для 720p/1080p. Kick free: макс. 4500.">?</span></label><input type="number" id="streamBitrateInput" value="6000" min="1000" max="30000" step="500"/><div id="hwEncoderInfo" style="font-size:11px;color:var(--text2);margin-top:4px">Кодировщик: libx264 (CPU)</div></div>
             <div class="form-group"><label>FPS (кадров/сек) <span class="hint-toggle" data-hint="Частота кадров на выходе (стрим/запись). 30 — стандарт для стрима, меньше нагрузка. 60 — плавное движение, выше нагрузка на ПК.">?</span></label><select id="settingsFps"><option value="30">30 — для стрима / слабый ПК</option><option value="60" selected>60 — плавно (по умолчанию)</option><option value="120">120 — максимум (для мощных ПК)</option></select></div>
           </div>
         </div>
@@ -395,6 +395,18 @@
           <p><b>Свой сервер:</b> введите URL вида rtmp://сервер/путь</p>
           <h3 style="color:var(--accent);margin:16px 0 6px">P2P со-стрим</h3>
           <p>Создайте комнату, отправьте код другу — он появится на вашей сцене. Нужен TURN-сервер для разных сетей.</p>
+          <h3 style="color:var(--accent);margin:16px 0 6px">Виртуальная камера</h3>
+          <p>Выводит сцену StreamBro как вебкамеру в Zoom, Discord, Teams и других приложениях.</p>
+          <p style="color:var(--muted)">Требует установленный <b>OBS Virtual Camera</b> или аналогичный DirectShow-драйвер.</p>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+            <button class="btn sm" id="btnVcamToggle" style="min-width:90px">Включить</button>
+            <select id="vcamDeviceSelect" style="background:var(--bg2);color:var(--text);border:1px solid var(--muted);border-radius:6px;padding:4px 8px;font-size:12px">
+              <option value="">Обнаружение...</option>
+            </select>
+            <button class="btn sm btn-ghost" id="btnVcamRefresh">↻</button>
+            <span id="vcamStatusText" style="font-size:11px;color:var(--muted)">Выключена</span>
+          </div>
+
           <h3 style="color:var(--accent);margin:16px 0 6px">Полезные ссылки</h3>
           <p><a href="#" onclick="event.preventDefault();try{window.electronAPI.openExternal('https://streambro.ru')}catch(e){}" style="color:var(--accent)">streambro.ru</a> — сайт проекта</p>
         </div>
@@ -403,6 +415,24 @@
 
     <div class="notifications" id="notifications"></div>
   </div>
+
+  <!-- ONBOARDING WIZARD -->
+  <div id="onboardingOverlay" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(8,8,26,0.92);backdrop-filter:blur(8px);align-items:center;justify-content:center">
+    <div id="onboardingBox" style="background:var(--bg1);border:1.5px solid var(--accent);border-radius:18px;padding:36px 40px;max-width:480px;width:90%;position:relative;box-shadow:0 8px 48px rgba(0,0,0,0.5)">
+      <div id="onboardStepIndicator" style="display:flex;gap:8px;justify-content:center;margin-bottom:24px">
+        <span class="ob-dot ob-dot-0 ob-dot-active"></span>
+        <span class="ob-dot ob-dot-1"></span>
+        <span class="ob-dot ob-dot-2"></span>
+        <span class="ob-dot ob-dot-3"></span>
+      </div>
+      <div id="onboardContent"></div>
+      <div style="display:flex;gap:10px;margin-top:28px;justify-content:flex-end">
+        <button id="onboardSkip" style="background:transparent;border:1px solid var(--muted);color:var(--text2);padding:8px 18px;border-radius:8px;cursor:pointer;font-size:13px">Пропустить</button>
+        <button id="onboardNext" style="background:var(--accent);color:#fff;border:none;padding:9px 24px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">Далее →</button>
+      </div>
+    </div>
+  </div>
+
   <script src="js/sounds.js"></script>
   <script src="js/gl-renderer.js"></script>
   <script src="js/webrtc.js"></script>

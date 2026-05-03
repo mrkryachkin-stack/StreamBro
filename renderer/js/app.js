@@ -5,7 +5,8 @@
 document.oncontextmenu=e=>e.preventDefault();
 
 const HANDLE_R=9, HIT_R=24, ROT_OFF=34, SNAP=30, MIN_DIM=20;
-let _gateWorkletLoaded=null; // Promise — resolved once AudioWorklet module is registered
+let _gateWorkletLoaded=null;    // Promise — resolved once noise-gate AudioWorklet is registered
+let _rnnoiseWorkletLoaded=null; // Promise — resolved once rnnoise AudioWorklet is registered
 
 const S={
   srcs:[], selId:null, items:[], wrtc:null, rtmp:null, streaming:false, roomCode:null,
@@ -21,6 +22,11 @@ const S={
   audioDest:null,        // MediaStreamDestination → recording/stream output
   audioNodes:new Map(),  // srcId → { sourceNode, gainNode, monitorGain, analyser, effectsChain }
   audioEffects:new Map(), // srcId → { noiseGate, eqLow, eqMid, eqHigh, compressor, limiter, fxState }
+  // ─── RNNoise AI denoising ───
+  _rnnoiseEnabled:false,
+  _rnnoiseWasm:null,
+  _rnnoiseWasmLoaded:false,
+  _rnnoiseNodes:new Map(), // srcId → AudioWorkletNode
   combinedStream:null,
   _canvasVideoTrack:null,
   _recTimerInterval:null,
@@ -138,6 +144,9 @@ function ensureAudioCtx(){
   // Register noise-gate AudioWorklet (replaces deprecated ScriptProcessorNode)
   _gateWorkletLoaded = S.audioCtx.audioWorklet.addModule('js/noise-gate-worklet.js')
     .catch(e=>{ if(window.__sbDev) console.warn('[Audio] noise-gate-worklet load failed, will use passthrough:',e); });
+  // Register RNNoise AudioWorklet (AI denoising, requires rnnoise.wasm)
+  _rnnoiseWorkletLoaded = S.audioCtx.audioWorklet.addModule('js/rnnoise-worklet.js')
+    .catch(e=>{ if(window.__sbDev) console.warn('[Audio] rnnoise-worklet load failed:',e); });
   for(const src of S.srcs){
     if(src.stream&&src.stream.getAudioTracks().length) _connectSource(src);
   }
@@ -274,9 +283,31 @@ async function _connectSource(src){
   limiter.attack.value=0.001;
   limiter.release.value=0.1;
 
-  // Chain: source → gateNode (AudioWorklet) → eqLow → eqMid → eqHigh → comp → compMakeup → limiter → [output]
+  // RNNoise node (AI denoising) — inserted between gateNode and EQ
+  let rnnoiseNode = null;
+  if (S._rnnoiseEnabled && S._rnnoiseWasmLoaded) {
+    try {
+      if (_rnnoiseWorkletLoaded) await _rnnoiseWorkletLoaded;
+      rnnoiseNode = new AudioWorkletNode(ctx, 'rnnoise-processor', {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2]
+      });
+      rnnoiseNode.port.postMessage({ type: 'init', wasmExports: S._rnnoiseWasm });
+      rnnoiseNode.port.postMessage({ type: 'enable', enabled: true });
+      S._rnnoiseNodes.set(src.id, rnnoiseNode);
+    } catch (e) {
+      if (window.__sbDev) console.warn('[RNNoise] node create failed:', e);
+      rnnoiseNode = null;
+    }
+  }
+
+  // Chain: source → gateNode (AudioWorklet) → [rnnoiseNode?] → eqLow → eqMid → eqHigh → comp → compMakeup → limiter → [output]
   sourceNode.connect(gateNode);
-  gateNode.connect(eqLow);
+  if (rnnoiseNode) {
+    gateNode.connect(rnnoiseNode);
+    rnnoiseNode.connect(eqLow);
+  } else {
+    gateNode.connect(eqLow);
+  }
   eqLow.connect(eqMid);
   eqMid.connect(eqHigh);
   eqHigh.connect(compressor);
@@ -318,6 +349,9 @@ function _disconnectSource(srcId){
   }
   if(n.rawSource) try{n.rawSource.disconnect();}catch(e){}
   if(n.splitter) try{n.splitter.disconnect();}catch(e){}
+  // Clean up RNNoise node if present
+  const rnNode = S._rnnoiseNodes.get(srcId);
+  if (rnNode) { try{rnNode.disconnect();}catch(e){} S._rnnoiseNodes.delete(srcId); }
   S.audioNodes.delete(srcId);
   S.audioEffects.delete(srcId);
 }
@@ -517,6 +551,10 @@ async function init(){
   // Load persisted settings
   await _loadSettings();
   _applyTheme();
+  // Onboarding wizard — show on first launch
+  if (!S.settings.onboardingComplete) {
+    _startOnboarding();
+  }
 
   bind();
   // WebGL2 renderer — experimental, disabled by default until fully polished.
@@ -566,6 +604,101 @@ async function init(){
   _initSoundSettingsPane();
   _initUpdatesPane();
   _initBugCapture();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RNNOISE AI DENOISING — WebAssembly loader
+// ═══════════════════════════════════════════════════════════
+async function _loadRNNoise() {
+  if (S._rnnoiseWasm) return S._rnnoiseWasm;
+  try {
+    const resp = await fetch('./js/rnnoise.wasm');
+    if (!resp.ok) throw new Error('rnnoise.wasm not found (place it in renderer/js/)');
+    const buf = await resp.arrayBuffer();
+    const result = await WebAssembly.instantiate(buf, {
+      env: { memory: new WebAssembly.Memory({ initial: 256 }) }
+    });
+    S._rnnoiseWasm = result.instance.exports;
+    S._rnnoiseWasmLoaded = true;
+    if (window.__sbDev) console.log('[RNNoise] WASM loaded');
+    return S._rnnoiseWasm;
+  } catch (e) {
+    if (window.__sbDev) console.warn('[RNNoise] WASM load failed:', e.message);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ONBOARDING WIZARD — shown once on first launch
+// ═══════════════════════════════════════════════════════════
+function _startOnboarding() {
+  const overlay = document.getElementById('onboardingOverlay');
+  const content = document.getElementById('onboardContent');
+  const nextBtn = document.getElementById('onboardNext');
+  const skipBtn = document.getElementById('onboardSkip');
+  if (!overlay) return;
+
+  const steps = [
+    {
+      icon: '🎬',
+      title: 'Добро пожаловать в StreamBro!',
+      desc: 'Простой стриминг и запись для Windows. Давай настроим всё за пару минут.',
+      action: null,
+    },
+    {
+      icon: '📷',
+      title: 'Добавь источник',
+      desc: 'Нажми «Добавить источник» — камеру, экран или окно. Перетаскивай и изменяй размер прямо на сцене.',
+      action: { label: 'Добавить источник', fn: () => { const btn = document.getElementById('addSrcBtn') || document.querySelector('[data-action="add-src"]'); if (btn) btn.click(); } },
+    },
+    {
+      icon: '🎙️',
+      title: 'Настрой звук',
+      desc: 'Открой микшер, выбери микрофон. Можно добавить шумодав, эквалайзер и компрессор в Audio FX.',
+      action: { label: 'Открыть микшер', fn: () => { const btn = document.getElementById('mixerToggle') || document.querySelector('[data-tab="mixer"]'); if (btn) btn.click(); } },
+    },
+    {
+      icon: '🚀',
+      title: 'Готово к стриму!',
+      desc: 'Укажи ключ стрима в настройках (вкладка «Стрим»). Нажми большую кнопку STREAM — и ты в эфире!',
+      action: { label: 'Открыть настройки', fn: () => { const btn = document.getElementById('settingsToggle') || document.querySelector('[data-action="settings"]'); if (btn) btn.click(); } },
+    },
+  ];
+
+  let step = 0;
+
+  function renderStep() {
+    const s = steps[step];
+    content.innerHTML = `
+      <div class="ob-step-icon">${s.icon}</div>
+      <div class="ob-step-title">${s.title}</div>
+      <p class="ob-step-desc">${s.desc}</p>
+      ${s.action ? `<div class="ob-step-action"><button class="ob-action-btn" id="obActionBtn">${s.action.label}</button></div>` : ''}
+    `;
+    if (s.action) {
+      const ab = document.getElementById('obActionBtn');
+      if (ab) ab.onclick = s.action.fn;
+    }
+    document.querySelectorAll('.ob-dot').forEach((d, i) => {
+      d.classList.toggle('ob-dot-active', i === step);
+    });
+    nextBtn.textContent = step === steps.length - 1 ? 'Начать! ✓' : 'Далее →';
+  }
+
+  function finish() {
+    overlay.style.display = 'none';
+    S.settings.onboardingComplete = true;
+    _scheduleSettingsSave();
+  }
+
+  nextBtn.onclick = () => {
+    if (step < steps.length - 1) { step++; renderStep(); }
+    else finish();
+  };
+  skipBtn.onclick = finish;
+
+  overlay.style.display = 'flex';
+  renderStep();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2722,6 +2855,15 @@ function _showFxModal(srcId){
         </div>
       </div>
       <div class="fx-section">
+        <div class="fx-header"><span class="fx-name">AI шумодав (RNNoise)</span><button class="fx-toggle ${S._rnnoiseEnabled?'on':''}" id="fxRnnoise">${S._rnnoiseEnabled?'ВКЛ':'ВЫКЛ'}</button></div>
+        <div class="fx-params">
+          <div class="fx-row" style="align-items:center;gap:8px">
+            <span class="fx-label" style="flex:1">Нейросетевое удаление шума (требует rnnoise.wasm)</span>
+            <span style="font-size:10px;color:var(--muted)" id="fxRnnoiseStatus">${S._rnnoiseWasmLoaded?'готов':'wasm не загружен'}</span>
+          </div>
+        </div>
+      </div>
+      <div class="fx-section">
         <div class="fx-header"><span class="fx-name">Эквалайзер</span><button class="fx-toggle ${eqOn?'on':''}" id="fxEq">${eqOn?'ВКЛ':'ВЫКЛ'}</button></div>
         <div class="fx-params">
           <div class="fx-row" style="gap:6px">
@@ -3756,10 +3898,27 @@ async function _changeCamResolution(src,w,h){
 // ═══════════════════════════════════════════════════════════
 //  STREAM
 // ═══════════════════════════════════════════════════════════
-function startStream(){
+async function startStream(){
   if(S.streaming)return;
   const k=D.streamKey.value.trim();
   if(!k){msg('Введите ключ стрима','error');return;}
+
+  // Detect hardware encoder once per session and cache result
+  if(!S._hwEncoder){
+    try{
+      const r=await window.electronAPI.detectHwEncoder();
+      S._hwEncoder=r&&r.encoder?r.encoder:'libx264';
+      if(window.__sbDev)console.log('[Stream] HW encoder:',S._hwEncoder);
+      const infoEl=document.getElementById('hwEncoderInfo');
+      if(infoEl){
+        const label=S._hwEncoder==='h264_nvenc'?'NVENC (NVIDIA GPU)'
+          :S._hwEncoder==='h264_amf'?'AMF (AMD GPU)'
+          :S._hwEncoder==='h264_qsv'?'QSV (Intel GPU)'
+          :'libx264 (CPU)';
+        infoEl.textContent='Кодировщик: '+label;
+      }
+    }catch(e){S._hwEncoder='libx264';}
+  }
   const p=D.streamPlatform.value;
   let srv;
   switch(p){
@@ -3811,6 +3970,7 @@ function startStream(){
   S.rtmp.setBitrate(parseInt(D.streamBitrateInput.value)||6000);
   S.rtmp.setResolution(D.streamResolution.value||'1280x720');
   S.rtmp.setFps(S._captureFps||60);
+  S.rtmp.setEncoder(S._hwEncoder||'libx264');
   S.rtmp.start();
 }
 
@@ -4361,7 +4521,121 @@ function _persistSettingsSafe() {
   } catch (e) {}
 }
 
+// ─── Virtual Camera UI ───────────────────────────────────────────────
+let _vcamEnabled = false;
+
+async function _initVcamUI() {
+  const toggleBtn = document.getElementById('btnVcamToggle');
+  const deviceSel = document.getElementById('vcamDeviceSelect');
+  const refreshBtn = document.getElementById('btnVcamRefresh');
+  const statusText = document.getElementById('vcamStatusText');
+
+  if (!toggleBtn) return;
+
+  async function _refreshDevices() {
+    deviceSel.innerHTML = '<option value="">Обнаружение...</option>';
+    try {
+      const r = await window.electronAPI.vcamListDevices();
+      deviceSel.innerHTML = '';
+      if (r.devices && r.devices.length > 0) {
+        r.devices.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d; opt.textContent = d;
+          if (d.toLowerCase().includes('obs')) opt.selected = true;
+          deviceSel.appendChild(opt);
+        });
+      } else {
+        const opt = document.createElement('option');
+        opt.value = 'OBS Virtual Camera'; opt.textContent = 'OBS Virtual Camera (по умолчанию)';
+        deviceSel.appendChild(opt);
+        if (r.error) { const e = document.createElement('option'); e.value = ''; e.textContent = '— нет DirectShow камер —'; deviceSel.appendChild(e); }
+      }
+    } catch (e) {
+      deviceSel.innerHTML = '<option value="OBS Virtual Camera">OBS Virtual Camera</option>';
+    }
+  }
+
+  refreshBtn.addEventListener('click', _refreshDevices);
+
+  toggleBtn.addEventListener('click', async () => {
+    if (_vcamEnabled) {
+      await window.electronAPI.vcamStop();
+      _vcamEnabled = false;
+      toggleBtn.textContent = 'Включить';
+      toggleBtn.style.background = '';
+      statusText.textContent = 'Выключена';
+    } else {
+      const device = deviceSel.value || 'OBS Virtual Camera';
+      const res = S.settings?.streaming?.resolution || '1280x720';
+      const [w, h] = res.split('x').map(Number);
+      const r = await window.electronAPI.vcamStart({ device, width: w || 1280, height: h || 720, fps: S._captureFps || 30 });
+      if (r.ok) {
+        _vcamEnabled = true;
+        toggleBtn.textContent = 'Выключить';
+        toggleBtn.style.background = 'var(--accent)';
+        statusText.textContent = `✓ ${device}`;
+        _startVcamFeed();
+      } else {
+        statusText.textContent = `Ошибка: ${r.error || 'не удалось запустить'}`;
+      }
+    }
+  });
+
+  window.electronAPI.onVcamStatus(data => {
+    _vcamEnabled = data.enabled;
+    toggleBtn.textContent = data.enabled ? 'Выключить' : 'Включить';
+    toggleBtn.style.background = data.enabled ? 'var(--accent)' : '';
+    statusText.textContent = data.enabled ? `✓ ${data.device}` : 'Выключена';
+    if (!data.enabled) _stopVcamFeed();
+  });
+
+  window.electronAPI.onVcamError(msg => {
+    if (window.__sbDev) console.warn('[VCam] error:', msg);
+    statusText.textContent = `Ошибка: ${msg.substring(0, 60)}`;
+  });
+
+  await _refreshDevices();
+}
+
+let _vcamFeedRecorder = null;
+function _startVcamFeed() {
+  if (_vcamFeedRecorder || !S.combinedStream) return;
+  try {
+    _vcamFeedRecorder = new MediaRecorder(S.combinedStream, {
+      mimeType: 'video/webm;codecs=vp9',
+      videoBitsPerSecond: 8000000,
+    });
+    _vcamFeedRecorder.ondataavailable = async e => {
+      if (!_vcamEnabled || !e.data || e.data.size === 0) return;
+      const buf = await e.data.arrayBuffer();
+      window.electronAPI.vcamWriteChunk(buf).catch(() => {});
+    };
+    _vcamFeedRecorder.start(100);
+  } catch (e) {
+    if (window.__sbDev) console.warn('[VCam] feed start error:', e);
+  }
+}
+
+function _stopVcamFeed() {
+  if (_vcamFeedRecorder) {
+    try { _vcamFeedRecorder.stop(); } catch {}
+    _vcamFeedRecorder = null;
+  }
+}
+
 document.addEventListener('DOMContentLoaded',init);
 window.msg = msg;
 window._scheduleSettingsSave = _scheduleSettingsSave;
+// Expose for hotkeys module
+window.S = S;
+window._markDirty = _markDirty;
+window._resetTransform = _resetTransform;
+window._undo = _undo;
+window._getSelectedItem = () => S.items?.find(it => it.sid === S.selId);
+window.togVis = togVis;
+window.togLock = togLock;
+window.rmSrc = rmSrc;
+window._updateGain = _updateGain;
+// Initialize virtual camera UI after DOM ready
+window.addEventListener('DOMContentLoaded', () => { _initVcamUI().catch(() => {}); });
 })();

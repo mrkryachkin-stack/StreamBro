@@ -1,6 +1,6 @@
 # StreamBro — Knowledge Base for AI Agents
 
-> Последнее обновление: 2026-05-03 (1.2.3+chat-fix — myUserId serverId, slider toggle, chat flicker)
+> Последнее обновление: 2026-05-03 (1.2.4 — chat bugfixes, OAuth UX, server security, monitoring)
 > Этот файл — «память» проекта. Новый агент должен прочитать его целиком перед началом работы.
 
 ---

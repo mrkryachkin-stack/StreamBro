@@ -1,6 +1,6 @@
 #!/bin/bash
 # StreamBro Server — Setup Script
-# Run on VPS: REDACTED_VPS_IP
+# Run on VPS (see VPS_IP in secrets)
 # Usage: bash setup.sh
 #
 # This script:

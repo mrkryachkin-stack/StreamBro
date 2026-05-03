@@ -2,7 +2,7 @@
 
 > Последнее обновление: 2026-05-01
 > Этот файл должен прочитать новый агент перед началом работы.
-> Сервер: REDACTED_VPS_IP, ОС: Linux (Ubuntu 24.04), доступ: SSH root
+> Сервер: _(IP в secrets)_, ОС: Linux (Ubuntu 24.04), доступ: SSH
 
 ---
 
@@ -157,7 +157,7 @@ curl -s https://streambro.ru/api/health
 ## 7. Как выложить новую версию приложения
 
 1. На ПК разработчика: обновить version в package.json, собрать zip
-2. Загрузить на сервер: `scp dist/StreamBro-X.Y.Z-portable.zip root@REDACTED_VPS_IP:/opt/server/downloads/`
+2. Загрузить на сервер: `scp dist/StreamBro-X.Y.Z-portable.zip root@<VPS_IP>:/opt/server/downloads/`
 3. Обновить latest.json:
 ```bash
 cat > /opt/server/data/updates/latest.json << EOF
@@ -209,10 +209,10 @@ free -m                                                  # RAM
 ## 10. DNS записи
 
 ```
-streambro.ru              → A  REDACTED_VPS_IP
-www.streambro.ru          → A  REDACTED_VPS_IP
-streambro.online          → A  REDACTED_VPS_IP
-www.streambro.online      → A  REDACTED_VPS_IP
+streambro.ru              → A  <VPS_IP>
+www.streambro.ru          → A  <VPS_IP>
+streambro.online          → A  <VPS_IP>
+www.streambro.online      → A  <VPS_IP>
 ```
 
 ---

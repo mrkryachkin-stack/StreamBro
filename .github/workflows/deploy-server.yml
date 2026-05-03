@@ -16,8 +16,8 @@ jobs:
       - name: Deploy server files via SSH
         uses: appleboy/ssh-action@v1
         with:
-          host: REDACTED_VPS_IP
-          username: root
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
           password: ${{ secrets.VPS_PASSWORD }}
           script: |
             # Copy updated files from git

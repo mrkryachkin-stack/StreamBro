@@ -4,8 +4,10 @@ const http = require("http");
 const cors = require("cors");
 const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
+const rateLimit = require("express-rate-limit");
 
 const { PrismaClient } = require("@prisma/client");
+const { csrfMiddleware } = require("./middleware/auth");
 const prisma = new PrismaClient();
 
 const authRoutes = require("./routes/auth");
@@ -28,6 +30,16 @@ const PresenceServer = require("./presence");
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3001;
+
+// ─── Presence WebSocket ────────────────────────────────────
+const presence = new PresenceServer(server);
+presence.setPrisma(prisma);
+app.set("presenceServer", presence);
+
+// Inject presence server into routes that need push notifications
+friendsRoutes.setPresence(presence);
+adminRoutes.setPresence(presence);
+chatRoutes.setPresence(presence);
 
 app.set("trust proxy", 1);
 
@@ -56,6 +68,28 @@ app.use((req, res, next) => {
   next();
 });
 
+// ─── Rate limiting (app-level, behind nginx rate limits) ──
+const _rl = (max, windowSec) => rateLimit({
+  windowMs: windowSec * 1000,
+  max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip || req.headers['x-forwarded-for'] || 'unknown',
+  handler: (req, res) => res.status(429).json({ error: "Слишком много запросов, попробуйте позже" }),
+  skip: (req) => process.env.NODE_ENV !== 'production',
+});
+// Strict: auth endpoints — 10 attempts per 5 min
+const authLimiter   = _rl(10, 300);
+// Moderate: friend requests — 15 per min
+const friendsLimiter = _rl(15, 60);
+// Chat: 60 messages per min
+const chatLimiter   = _rl(60, 60);
+// General API: 120 per min
+const apiLimiter    = _rl(120, 60);
+
+// ─── CSRF protection ──────────────────────────────────────
+app.use("/api", csrfMiddleware);
+
 // ─── Routes ────────────────────────────────────────────────
 // Cloudflare cache bypass — prevent CDN from caching any API response
 // (Cloudflare respects Surrogate-Control and CDN-Cache-Control)
@@ -66,19 +100,19 @@ app.use("/api", (req, res, next) => {
   next();
 });
 
-app.use("/api/auth", authRoutes);
-app.use("/api/user", userRoutes);
-app.use("/api/user", profileRoutes);
-app.use("/api/subscription", subscriptionRoutes);
-app.use("/api/download", downloadRoutes);
-app.use("/api/bugs", bugRoutes);
+app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/user", apiLimiter, userRoutes);
+app.use("/api/user", apiLimiter, profileRoutes);
+app.use("/api/subscription", apiLimiter, subscriptionRoutes);
+app.use("/api/download", apiLimiter, downloadRoutes);
+app.use("/api/bugs", apiLimiter, bugRoutes);
 app.use("/api/updates", updateRoutes);
-app.use("/api/turn", turnRoutes);
-app.use("/api/friends", friendsRoutes);
-app.use("/api/chat", chatRoutes);
-app.use("/api/rooms", roomsRoutes);
-app.use("/api/stream-events", streamEventRoutes);
-app.use("/api/settings", settingsRoutes);
+app.use("/api/turn", apiLimiter, turnRoutes);
+app.use("/api/friends", friendsLimiter, friendsRoutes);
+app.use("/api/chat", chatLimiter, chatRoutes.router || chatRoutes);
+app.use("/api/rooms", apiLimiter, roomsRoutes);
+app.use("/api/stream-events", apiLimiter, streamEventRoutes);
+app.use("/api/settings", apiLimiter, settingsRoutes);
 app.use("/api/admin", adminRoutes);
 
 // ─── Health check ──────────────────────────────────────────
@@ -98,11 +132,6 @@ app.use((err, req, res, _next) => {
     error: process.env.NODE_ENV === "production" ? "Internal error" : err.message,
   });
 });
-
-// ─── Presence WebSocket ────────────────────────────────────
-const presence = new PresenceServer(server);
-presence.setPrisma(prisma);
-app.set("presenceServer", presence);
 
 // ─── Room cleanup cron ────────────────────────────────────
 // Every hour: close rooms with no active members for >24h, expire old CLOSED rooms
@@ -136,10 +165,62 @@ setInterval(async () => {
 }, 3600000); // 1 hour
 
 // ─── Start ─────────────────────────────────────────────────
+async function _ensureSupportUser() {
+  try {
+    let supportUser = await prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (!supportUser) {
+      supportUser = await prisma.user.create({
+        data: {
+          username: "StreamBro",
+          email: "support@streambro.ru",
+          passwordHash: "_system_",
+          role: "SUPPORT",
+          displayName: "StreamBro Поддержка",
+          avatarUrl: "https://streambro.ru/logo.png",
+          emailVerified: true,
+          status: "online",
+        },
+      });
+      console.log(`[SUPPORT] Created support user: ${supportUser.id}`);
+    }
+
+    // Auto-friend ALL existing users with StreamBro support
+    const users = await prisma.user.findMany({
+      where: { role: { not: "SUPPORT" } },
+      select: { id: true },
+    });
+    let added = 0;
+    for (const u of users) {
+      const existing = await prisma.friendship.findFirst({
+        where: {
+          OR: [
+            { requesterId: supportUser.id, addresseeId: u.id },
+            { requesterId: u.id, addresseeId: supportUser.id },
+          ],
+        },
+      });
+      if (!existing) {
+        await prisma.friendship.create({
+          data: {
+            requesterId: supportUser.id,
+            addresseeId: u.id,
+            status: "ACCEPTED",
+          },
+        });
+        added++;
+      }
+    }
+    if (added > 0) console.log(`[SUPPORT] Auto-friended ${added} users with StreamBro`);
+  } catch (err) {
+    console.error("[SUPPORT] Failed to create support user:", err.message);
+  }
+}
+
 async function start() {
   try {
     await prisma.$connect();
     console.log("[DB] PostgreSQL connected");
+    await _ensureSupportUser();
     server.listen(PORT, () => {
       console.log(`[API] StreamBro server running on :${PORT}`);
       console.log(`[PRESENCE] WebSocket on /presence`);

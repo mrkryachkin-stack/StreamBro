@@ -222,7 +222,10 @@ app.whenReady().then(() => {
   // process.argv on second-instance.
   app.on('open-url', (event, url) => {
     event.preventDefault();
-    profileMgr.handleDeepLink(url);
+    if (profileMgr.handleDeepLink(url)) {
+      friendsStore.syncFromServer().catch(() => {});
+      _emit('profile-updated', profileMgr.getPublic());
+    }
   });
 });
 
@@ -231,7 +234,10 @@ function _consumeDeepLinkFromArgv(argv) {
   if (!Array.isArray(argv)) return;
   for (const arg of argv) {
     if (typeof arg === 'string' && arg.startsWith('streambro://')) {
-      profileMgr.handleDeepLink(arg);
+      if (profileMgr.handleDeepLink(arg)) {
+        friendsStore.syncFromServer().catch(() => {});
+        _emit('profile-updated', profileMgr.getPublic());
+      }
     }
   }
 }
@@ -1039,10 +1045,25 @@ ipcMain.handle('profile-upload-avatar', async (_e, filePayload) => {
 
   return { ok: true, avatarUrl: localUrl };
 });
-ipcMain.handle('profile-logout',      () => profileMgr.logout());
+ipcMain.handle('profile-logout',      () => {
+  const res = profileMgr.logout();
+  if (res.success) {
+    friendsStore.clear();
+    _emit('friends-changed', { reason: 'logout' });
+    _emit('profile-updated', profileMgr.getPublic());
+  }
+  return res;
+});
 ipcMain.handle('profile-open-signup', () => { profileMgr.openSignup();  return { success: true }; });
 ipcMain.handle('profile-open-login',  () => { profileMgr.openLogin();   return { success: true }; });
 ipcMain.handle('profile-open-page',   () => { profileMgr.openProfile(); return { success: true }; });
+ipcMain.handle('profile-open-oauth', (_e, provider) => {
+  const valid = ['google', 'vk'];
+  if (!valid.includes(provider)) return { success: false, error: 'Invalid provider' };
+  const url = `https://streambro.ru/api/auth/${provider}?redirect=app`;
+  require('electron').shell.openExternal(url);
+  return { success: true };
+});
 // Local-only login stub: lets us pretend the user finished signup so the rest
 // of the UI can be tested before the backend is up. Returns the same payload
 // shape that the real /login endpoint will return.
@@ -1091,6 +1112,7 @@ ipcMain.handle('profile-login', async (_e, { login, password }) => {
       email: user.email || '',
       avatar: user.avatarUrl || '',
     });
+    friendsStore.syncFromServer().catch(() => {});
     return { success: true, profile: profileMgr.getPublic() };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1128,6 +1150,7 @@ ipcMain.handle('profile-register', async (_e, { email, username, password }) => 
       email: user.email || '',
       avatar: '',
     });
+    friendsStore.syncFromServer().catch(() => {});
     return { success: true, profile: profileMgr.getPublic() };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1137,7 +1160,24 @@ ipcMain.handle('profile-register', async (_e, { email, username, password }) => 
 // ─── Friends IPC (1.1.0) — hybrid: server API when authenticated, local fallback ───
 ipcMain.handle('friends-list',        async () => {
   const token = profileMgr.getToken();
-  if (token) { const r = await serverApi.friendsList(); if (r.ok) return r.data; }
+  if (token) {
+    // Use cached data from friendsStore (synced periodically via friends-sync)
+    // instead of making HTTP request on every refresh()
+    const cached = friendsStore.listFriends();
+    if (cached && cached.length > 0) return cached;
+    // Fallback to direct API if cache is empty
+    const r = await serverApi.friendsList();
+    if (r.ok && Array.isArray(r.data)) {
+      // Map server fields to the format UI expects
+      return r.data.map(f => ({
+        id: f.id,
+        serverId: f.id,
+        nickname: f.displayName || f.username || 'Друг',
+        avatar: f.avatarUrl || '',
+        status: f.status || 'offline',
+      }));
+    }
+  }
   return friendsStore.listFriends();
 });
 ipcMain.handle('friends-requests',    async () => {

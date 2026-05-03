@@ -63,18 +63,39 @@
         _flashTos();
         return;
       }
-      await window.electronAPI.profileUpdate({
+      // Save consent async, don't wait — form must open immediately
+      window.electronAPI.profileUpdate({
         consents: { bugReports: !!(cbBugs && cbBugs.checked), tos: true },
-      });
+      }).catch(() => {});
       _showInlineForm('register');
     });
 
-    btnLogin && btnLogin.addEventListener('click', async () => {
-      await window.electronAPI.profileUpdate({
+    btnLogin && btnLogin.addEventListener('click', () => {
+      // Save consent async, don't wait — form must open immediately
+      window.electronAPI.profileUpdate({
         consents: { bugReports: !!(cbBugs && cbBugs.checked), tos: !!(cbTos && cbTos.checked) },
-      });
+      }).catch(() => {});
       _showInlineForm('login');
     });
+
+    // OAuth buttons on welcome overlay — use {once:true} to prevent duplicate listeners
+    // when _wireWelcome() is called multiple times (e.g. after "back" click)
+    const btnGoogle = $('welcomeBtnGoogle');
+    if (btnGoogle && !btnGoogle._oauthWired) {
+      btnGoogle._oauthWired = true;
+      btnGoogle.addEventListener('click', () => {
+        window.electronAPI.profileOpenOAuth('google');
+        _showSignupHint();
+      });
+    }
+    const btnVK = $('welcomeBtnVK');
+    if (btnVK && !btnVK._oauthWired) {
+      btnVK._oauthWired = true;
+      btnVK.addEventListener('click', () => {
+        window.electronAPI.profileOpenOAuth('vk');
+        _showSignupHint();
+      });
+    }
 
     btnDev && btnDev.addEventListener('click', async () => {
       const nick = (inpNick && inpNick.value.trim()) || 'Stream Brother';
@@ -151,6 +172,10 @@
           </div>
           <div class="profile-actions" style="margin-top:1rem">
             <button class="btn btn-accent" id="inlineSubmit" style="width:100%">${isReg ? 'Создать аккаунт' : 'Войти'}</button>
+            <div style="display:flex;gap:0.5rem;margin-top:0.75rem">
+              <button class="btn" id="inlineGoogle" style="flex:1;font-size:0.82rem">Google</button>
+              <button class="btn" id="inlineVK" style="flex:1;font-size:0.82rem">VK</button>
+            </div>
             <button class="btn-link" id="inlineBack" style="margin-top:0.5rem;font-size:0.85rem">← Назад</button>
           </div>
         </div>
@@ -160,17 +185,27 @@
     const errEl = $('inlineFormError');
     const submitBtn = $('inlineSubmit');
     const backBtn = $('inlineBack');
+    const googleBtn = $('inlineGoogle');
+    const vkBtn = $('inlineVK');
 
     backBtn && backBtn.addEventListener('click', () => {
       const saved = card.getAttribute('data-orig-html');
       if (saved) {
         card.innerHTML = saved;
         card.removeAttribute('data-orig-html');
-        // Re-wire welcome buttons since innerHTML was restored
         if (isWelcome) _wireWelcome();
       } else {
         _refresh();
       }
+    });
+
+    googleBtn && googleBtn.addEventListener('click', () => {
+      window.electronAPI.profileOpenOAuth('google');
+      _showSignupHint();
+    });
+    vkBtn && vkBtn.addEventListener('click', () => {
+      window.electronAPI.profileOpenOAuth('vk');
+      _showSignupHint();
     });
 
     submitBtn && submitBtn.addEventListener('click', async () => {
@@ -365,15 +400,30 @@
     const bWeb = $('profileBtnOpenWeb');
     bWeb && bWeb.addEventListener('click', () => window.electronAPI.profileOpenPage());
 
+    // OAuth buttons in settings card (for unregistered users)
+    const bGoogle = $('profileBtnGoogle');
+    bGoogle && bGoogle.addEventListener('click', () => window.electronAPI.profileOpenOAuth('google'));
+    const bVK = $('profileBtnVK');
+    bVK && bVK.addEventListener('click', () => window.electronAPI.profileOpenOAuth('vk'));
+
     const bChangePwd = $('profileBtnChangePassword');
     bChangePwd && bChangePwd.addEventListener('click', () => _showChangePasswordForm());
 
     const bLogout = $('profileBtnLogout');
     bLogout && bLogout.addEventListener('click', async () => {
-      if (!confirm('Выйти из аккаунта? Локальные настройки и друзья останутся.')) return;
+      if (!confirm('Выйти из аккаунта? Друзья и чаты этого аккаунта будут очищены.')) return;
       await window.electronAPI.profileLogout();
       try { window.SBSounds && window.SBSounds.play('notification'); } catch (e) {}
+      // Clear friends cache on logout
+      try { window.SBFriends && window.SBFriends.reset(); } catch (e) {}
+      // Clear any stale form state
+      const overlay = $('welcomeOverlay');
+      if (overlay) overlay.removeAttribute('data-orig-html');
+      const sCard = $('settingsProfileCard');
+      if (sCard) sCard.removeAttribute('data-orig-html');
       await _refresh();
+      _showWelcome();
+      _wireWelcome();
     });
 
     _refreshBugStatus();

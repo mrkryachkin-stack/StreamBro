@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const router = express.Router();
 const { registerSchema, loginSchema, changePasswordSchema, resetRequestSchema, resetConfirmSchema } = require("../utils/validation");
+const { authMiddleware } = require("../middleware/auth");
 const { signToken, setTokenCookie, clearTokenCookie } = require("../utils/tokens");
 const { sendVerificationEmail, sendResetEmail } = require("../utils/mail");
 
@@ -47,6 +48,18 @@ router.post("/register", async (req, res) => {
 
     const token = signToken({ id: user.id, email: user.email, username: user.username, role: user.role });
     setTokenCookie(res, token);
+
+    // Auto-friend with StreamBro support user
+    try {
+      const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+      if (supportUser) {
+        await req.prisma.friendship.create({
+          data: { requesterId: supportUser.id, addresseeId: user.id, status: "ACCEPTED" },
+        });
+      }
+    } catch (e) {
+      console.warn("[AUTH] Auto-friend with support failed:", e.message);
+    }
 
     // Send verification email (async, don't block response)
     sendVerificationEmail(email, verifyToken).catch((err) => {
@@ -256,7 +269,7 @@ router.post("/reset-confirm", async (req, res) => {
 });
 
 // ─── POST /api/auth/change-password ───────────────────────
-router.post("/change-password", async (req, res) => {
+router.post("/change-password", authMiddleware, async (req, res) => {
   if (!req.user) return res.status(401).json({ error: "Не авторизован" });
 
   const parse = changePasswordSchema.safeParse(req.body);
@@ -381,12 +394,23 @@ router.get("/google/callback", async (req, res) => {
 
     // Decode state to determine redirect
     let redirectTo = "/dashboard";
+    let isAppRedirect = false;
     try {
       const stateObj = JSON.parse(Buffer.from(req.query.state, "base64url").toString());
       if (stateObj.r === "app") {
+        isAppRedirect = true;
         redirectTo = `streambro://login?token=${encodeURIComponent(result.token)}&username=${encodeURIComponent(result.user.username)}&id=${result.user.id}&email=${encodeURIComponent(result.user.email || "")}`;
       }
     } catch {}
+
+    if (isAppRedirect) {
+      // Show a clean close-this-window page to prevent browser opening extra tabs
+      const escaped = redirectTo.replace(/'/g, "\\'");
+      return res.send(`<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>StreamBro</title>
+<style>body{font-family:system-ui,sans-serif;background:#08081a;color:#ececef;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:16px}h2{margin:0;font-size:1.4rem}p{margin:0;color:#a4a4ac;font-size:0.9rem}.check{font-size:3rem}</style>
+</head><body><div class="check">✅</div><h2>Вы вошли в StreamBro</h2><p>Это окно можно закрыть. Приложение уже получило доступ.</p>
+<script>try{window.location.href='${escaped}';}catch(e){}setTimeout(()=>{try{window.close();}catch(e){}},2000);</script></body></html>`);
+    }
 
     res.redirect(redirectTo);
   } catch (err) {
@@ -484,12 +508,22 @@ router.get("/vk/callback", async (req, res) => {
 
     // Decode state to determine redirect
     let redirectTo = "/dashboard";
+    let isAppRedirect = false;
     try {
       const stateObj = JSON.parse(Buffer.from(req.query.state, "base64url").toString());
       if (stateObj.r === "app") {
+        isAppRedirect = true;
         redirectTo = `streambro://login?token=${encodeURIComponent(result.token)}&username=${encodeURIComponent(result.user.username)}&id=${result.user.id}&email=${encodeURIComponent(result.user.email || "")}`;
       }
     } catch {}
+
+    if (isAppRedirect) {
+      const escaped = redirectTo.replace(/'/g, "\\'");
+      return res.send(`<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>StreamBro</title>
+<style>body{font-family:system-ui,sans-serif;background:#08081a;color:#ececef;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:16px}h2{margin:0;font-size:1.4rem}p{margin:0;color:#a4a4ac;font-size:0.9rem}.check{font-size:3rem}</style>
+</head><body><div class="check">✅</div><h2>Вы вошли в StreamBro</h2><p>Это окно можно закрыть. Приложение уже получило доступ.</p>
+<script>try{window.location.href='${escaped}';}catch(e){}setTimeout(()=>{try{window.close();}catch(e){}},2000);</script></body></html>`);
+    }
 
     res.redirect(redirectTo);
   } catch (err) {
@@ -594,6 +628,19 @@ async function _findOrCreateOAuthUser(req, { provider, providerId, email, name, 
   });
 
   const token = signToken({ id: user.id, email: user.email, username: user.username, role: user.role });
+
+  // Auto-friend with StreamBro support user
+  try {
+    const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (supportUser) {
+      await req.prisma.friendship.create({
+        data: { requesterId: supportUser.id, addresseeId: user.id, status: "ACCEPTED" },
+      });
+    }
+  } catch (e) {
+    console.warn("[AUTH] Auto-friend with support failed:", e.message);
+  }
+
   return { user, token, isNew: true };
 }
 

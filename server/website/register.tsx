@@ -11,12 +11,15 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
 
-  // Redirect to dashboard if already logged in
+  // Redirect to dashboard if already logged in with a valid token
   useEffect(() => {
     document.title = "StreamBro — Регистрация";
     fetch("/api/user/test-cookie", { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => { if (d.hasCookie) window.location.href = "/dashboard"; })
+      .then((r) => {
+        if (!r.ok) return null;
+        return r.json();
+      })
+      .then((d) => { if (d && d.hasCookie && d.valid !== false) window.location.href = "/dashboard"; })
       .catch(() => {});
   }, []);
 

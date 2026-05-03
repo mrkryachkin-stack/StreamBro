@@ -61,6 +61,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   profileOpenSignup: () => ipcRenderer.invoke('profile-open-signup'),
   profileOpenLogin:  () => ipcRenderer.invoke('profile-open-login'),
   profileOpenPage:   () => ipcRenderer.invoke('profile-open-page'),
+  profileOpenOAuth:  (provider) => ipcRenderer.invoke('profile-open-oauth', provider),
   profileDevLogin:   (payload) => ipcRenderer.invoke('profile-dev-login', payload),
   profileLogin:      (creds) => ipcRenderer.invoke('profile-login', creds),
   profileRegister:   (creds) => ipcRenderer.invoke('profile-register', creds),

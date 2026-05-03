@@ -28,6 +28,7 @@ model User {
 
   subscription   Subscription?
   downloads      Download[]
+  auditLogs      AuditLog[]
   settingsBlob   SettingsBlob?
   streamEvents   StreamEvent[]
   sentMessages   Message[]  @relation("SentMessages")
@@ -64,6 +65,7 @@ model Account {
 enum Role {
   USER
   ADMIN
+  SUPPORT
 }
 
 model Subscription {
@@ -240,6 +242,25 @@ model SettingsBlob {
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("settings_blobs")
+}
+
+// ─── Audit Log (admin actions) ─────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  adminId    String
+  action     String   // e.g. "ban_user", "delete_bug", "change_role"
+  targetId   String?  // affected entity id
+  targetType String?  // "user", "bug", "room", etc.
+  details    String?  @db.Text
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  admin      User     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
 }
 
 // ─── Bug Reports (from desktop app) ────────────────────────

@@ -12,6 +12,14 @@ let _emit = () => {};
 
 const STATUSES = ['online', 'offline', 'streaming', 'gaming', 'away', 'dnd', 'invisible'];
 
+const SERVER_BASE = 'https://streambro.ru';
+function _normalizeAvatarUrl(url) {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('avatar:')) return url;
+  if (url.startsWith('/')) return SERVER_BASE + url;
+  return url;
+}
+
 function init(settingsRef, onChangeCb, emitCb) {
   _settings = settingsRef;
   _onChange = typeof onChangeCb === 'function' ? onChangeCb : (() => {});
@@ -62,8 +70,8 @@ async function syncFromServer() {
       _settings.friends.list = friendsRes.data.map(f => ({
         id: f.id || f.friendId,
         serverId: f.id || f.friendId,
-        nickname: f.username || f.displayName || 'Друг',
-        avatar: f.avatarUrl || '',
+        nickname: f.displayName || f.username || 'Друг',
+        avatar: _normalizeAvatarUrl(f.avatarUrl || ''),
         status: f.status || 'offline',
         lastSeen: f.lastLoginAt ? new Date(f.lastLoginAt).getTime() : Date.now(),
         addedAt: f.createdAt ? new Date(f.createdAt).getTime() : Date.now(),
@@ -188,6 +196,19 @@ function devAddFriend({ nickname, status }) {
 async function removeFriend(friendId) {
   if (!_settings || !friendId) return { success: false };
 
+  // Protect StreamBro support friend from deletion
+  const friend = _settings.friends.list.find(f => f.id === friendId);
+  if (friend && friend.nickname === 'StreamBro Поддержка') {
+    return { success: false, error: 'Нельзя удалить поддержку StreamBro' };
+  }
+  // Also protect by serverId matching the support user pattern
+  if (friend && friend.serverId && _isAuthenticated()) {
+    // Server-side protection — check via username
+    if (friend.nickname && friend.nickname.startsWith('StreamBro')) {
+      return { success: false, error: 'Нельзя удалить поддержку StreamBro' };
+    }
+  }
+
   // Remove from server if authenticated
   if (_isAuthenticated() && _serverApi) {
     try {
@@ -254,6 +275,15 @@ function markRead(friendId) {
   return { success: true };
 }
 
+// ─── Clear all friends data (called on logout) ───
+function clear() {
+  if (!_settings) return { success: false };
+  _settings.friends = { list: [], requests: { incoming: [], outgoing: [] }, chats: {}, unread: {} };
+  _save();
+  _emit('friends-changed', { reason: 'cleared' });
+  return { success: true };
+}
+
 // ─── Dev helper: simulate inbound message (so we can test pulse/chat UI) ───
 function devSimulateInbound(friendId, text) {
   return sendMessage({ friendId, text, fromMe: false });
@@ -275,5 +305,6 @@ module.exports = {
   markRead,
   devSimulateInbound,
   syncFromServer,
+  clear,
   _genCode,
 };

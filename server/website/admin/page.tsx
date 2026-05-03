@@ -38,7 +38,7 @@ type Room = {
   members: { userId: string; role: string; user: { id: string; username: string; displayName: string; avatarUrl: string | null } }[];
 };
 
-const TABS = ["stats", "users", "rooms", "bugs", "announce"] as const;
+const TABS = ["stats", "users", "rooms", "bugs", "feedback", "announce"] as const;
 type Tab = (typeof TABS)[number];
 
 // Authenticated fetch — adds ADMIN_SECRET from sessionStorage if available
@@ -49,6 +49,68 @@ function adminFetch(path: string, options: RequestInit = {}) {
   };
   if (secret) headers["Authorization"] = `Bearer ${secret}`;
   return fetch(path, { ...options, headers, credentials: "include" });
+}
+
+interface FeedbackConv { partner: { id: string; username: string; displayName: string | null; avatarUrl: string | null }; messages: { id: string; content: string; fromSupport: boolean; edited: boolean; createdAt: string }[]; lastMessage: { id: string; content: string; fromSupport: boolean; edited: boolean; createdAt: string }; unread: number }
+
+function FeedbackSection() {
+  const [convos, setConvos] = useState<FeedbackConv[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState("");
+  const [sent, setSent] = useState(false);
+
+  useEffect(() => {
+    adminFetch("/api/admin/feedback").then(r => r.json()).then(d => { if (d.conversations) setConvos(d.conversations); }).catch(() => {});
+  }, [sent]);
+
+  const selected = convos.find(c => c.partner.id === selectedId);
+  const msgs = selected?.messages || [];
+
+  const handleReply = async () => {
+    if (!selectedId || !replyText.trim()) return;
+    await adminFetch("/api/admin/feedback/reply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId: selectedId, content: replyText.trim() }) });
+    setReplyText("");
+    setSent(!sent);
+  };
+
+  return (
+    <div style={{ display: "flex", gap: "1rem", minHeight: 400 }}>
+      <div style={{ flex: "0 0 260px", overflowY: "auto", borderRight: "1px solid rgba(255,255,255,0.06)", paddingRight: "1rem" }}>
+        <div style={{ color: "#94a3b8", fontSize: "0.8rem", marginBottom: "0.5rem" }}>{"Пользователи"}</div>
+        {convos.map(c => (
+          <div key={c.partner.id} onClick={() => setSelectedId(c.partner.id)} style={{ padding: "0.5rem 0.6rem", borderRadius: 6, cursor: "pointer", marginBottom: 4, background: selectedId === c.partner.id ? "rgba(139,92,246,0.12)" : "transparent" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>{c.partner.displayName || c.partner.username}</span>
+              {c.unread > 0 && <span style={{ fontSize: "0.7rem", background: "#ef4444", color: "#fff", borderRadius: 8, padding: "0.1rem 0.4rem" }}>{c.unread}</span>}
+            </div>
+            <div style={{ fontSize: "0.75rem", color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.lastMessage?.content?.slice(0, 40)}</div>
+          </div>
+        ))}
+        {convos.length === 0 && <div style={{ color: "#64748b", fontSize: "0.85rem" }}>{"Нет обращений"}</div>}
+      </div>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        {selected ? (
+          <>
+            <div style={{ fontWeight: 700, marginBottom: "0.5rem", fontSize: "0.95rem" }}>{selected.partner.displayName || selected.partner.username}</div>
+            <div style={{ flex: 1, overflowY: "auto", marginBottom: "0.5rem", maxHeight: 350 }}>
+              {msgs.slice().reverse().map(m => (
+                <div key={m.id} style={{ marginBottom: "0.4rem", textAlign: m.fromSupport ? "right" : "left" }}>
+                  <span style={{ display: "inline-block", padding: "0.4rem 0.7rem", borderRadius: 8, fontSize: "0.85rem", background: m.fromSupport ? "rgba(139,92,246,0.15)" : "rgba(255,255,255,0.06)", maxWidth: "80%" }}>{m.content}</span>
+                  <div style={{ fontSize: "0.65rem", color: "#475569" }}>{new Date(m.createdAt).toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <input value={replyText} onChange={e => setReplyText(e.target.value)} placeholder="Ответить..." style={{ flex: 1, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "0.5rem", color: "#e2e8f0", fontSize: "0.85rem" }} onKeyDown={e => { if (e.key === "Enter") handleReply(); }} />
+              <button onClick={handleReply} disabled={!replyText.trim()} style={{ padding: "0.5rem 1rem", borderRadius: 8, border: "none", cursor: "pointer", background: "rgba(139,92,246,0.2)", color: "#c4b5fd", fontWeight: 600, opacity: replyText.trim() ? 1 : 0.5 }}>{"→"}</button>
+            </div>
+          </>
+        ) : (
+          <div style={{ color: "#64748b", fontSize: "0.85rem", padding: "2rem 0" }}>{"Выберите пользователя слева"}</div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function AdminPage() {
@@ -357,6 +419,9 @@ export default function AdminPage() {
             ))}
           </div>
         )}
+
+        {/* Feedback */}
+        {activeTab === "feedback" && <FeedbackSection />}
 
         {/* Announce */}
         {activeTab === "announce" && (

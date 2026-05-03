@@ -79,6 +79,10 @@ const DEFAULT_SETTINGS = {
     },
     chats: {},               // { friendId: [{id, from, text, ts, read}] }
     unread: {},              // { friendId: count }
+    notifications: {
+      sound: true,           // play sound on new message/friend event
+      badge: true,           // show unread badge on friends panel
+    },
   },
 
   // ─── Sounds (1.1.0) ───

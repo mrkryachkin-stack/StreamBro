@@ -134,14 +134,16 @@ export default function DashboardPage() {
       api.get<Room[]>("/rooms/mine/list").then(setRooms).catch(() => {});
       api.get<StreamStats>("/stream-events/stats").then(setStreamStats).catch(() => {});
     } catch (err) {
-      // Only redirect to login on auth errors (401/403)
-      const msg = err instanceof Error ? err.message : "";
-      if (msg.includes("401") || msg.includes("авториза") || msg.includes("Токен") || msg.includes("Невалид")) {
-        await api.post("/auth/logout").catch(() => {});
+      // Redirect to login on auth errors (401/403) — clear cookie first
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = (err as any)?.status || (err as any)?.statusCode;
+      if (status === 401 || status === 403 || msg.includes("401") || msg.includes("403") || msg.includes("авториза") || msg.includes("Токен") || msg.includes("Невалид")) {
+        await fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+        document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
         window.location.href = "/login";
-      } else {
-        setError("Ошибка загрузки данных. Попробуйте обновить страницу.");
+        return;
       }
+      setError("Ошибка загрузки данных. Попробуйте обновить страницу.");
     } finally {
       setLoading(false);
     }
@@ -263,7 +265,19 @@ export default function DashboardPage() {
     );
   }
 
-  if (!user) return null;
+  if (!user) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0a0a12" }}>
+        <div style={{ textAlign: "center" }}>
+          <p style={{ color: "#f87171", marginBottom: "1rem" }}>{error || "Не удалось загрузить профиль"}</p>
+          <button onClick={async () => { await fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {}); document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;"; window.location.href = "/login"; }} style={{
+            padding: "0.5rem 1.5rem", borderRadius: 8, background: "rgba(139,92,246,0.2)", color: "#c4b5fd",
+            border: "1px solid rgba(139,92,246,0.3)", cursor: "pointer", fontSize: "0.9rem",
+          }}>{"Войти заново"}</button>
+        </div>
+      </div>
+    );
+  }
 
   const currentStatus = STATUS_OPTIONS.find((s) => s.value === editStatus) || STATUS_OPTIONS[0];
 
@@ -761,7 +775,7 @@ export default function DashboardPage() {
                         {"Windows x64"}{" - "}{download.filename}
                       </p>
                     </div>
-                    <a href="/api/download/portable/StreamBro-1.2.1-portable.zip" style={{
+                    <a href={download ? `/api/download/portable/${download.filename}` : "/api/download/portable/StreamBro-1.2.3-portable.zip"} style={{
                       padding: "0.7rem 1.5rem", fontSize: "0.9rem", borderRadius: 8,
                       background: "rgba(139,92,246,0.2)", color: "#c4b5fd", border: "1px solid rgba(139,92,246,0.3)",
                       textDecoration: "none", display: "inline-block",

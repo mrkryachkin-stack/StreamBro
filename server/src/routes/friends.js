@@ -2,6 +2,10 @@ const express = require("express");
 const router = express.Router();
 const { authMiddleware } = require("../middleware/auth");
 
+// Presence server reference — set from index.js
+let _presence = null;
+function setPresence(presenceServer) { _presence = presenceServer; }
+
 // ─── GET /api/friends ──────────────────────────────────────
 // List all accepted friends
 router.get("/", authMiddleware, async (req, res) => {
@@ -89,6 +93,16 @@ router.post("/request", authMiddleware, async (req, res) => {
       data: { requesterId: req.user.id, addresseeId: userId },
     });
 
+    // Notify the target user about the new friend request
+    if (_presence) {
+      _presence.notifyUser(userId, {
+        type: "friend-request",
+        userId: req.user.id,
+        friendshipId: friendship.id,
+        timestamp: Date.now(),
+      });
+    }
+
     res.status(201).json({ id: friendship.id, status: "PENDING" });
   } catch (err) {
     console.error("[FRIENDS] Request error:", err);
@@ -111,6 +125,16 @@ router.post("/accept", authMiddleware, async (req, res) => {
       where: { id: friendshipId },
       data: { status: "ACCEPTED" },
     });
+
+    // Notify the requester that their friend request was accepted
+    if (_presence) {
+      _presence.notifyUser(friendship.requesterId, {
+        type: "friend-accepted",
+        userId: req.user.id,
+        friendshipId,
+        timestamp: Date.now(),
+      });
+    }
 
     res.json({ ok: true });
   } catch (err) {
@@ -138,11 +162,17 @@ router.post("/reject", authMiddleware, async (req, res) => {
 });
 
 // ─── DELETE /api/friends/:userId ───────────────────────────
-// Remove a friend
+// Remove a friend (cannot remove StreamBro support)
 router.delete("/:userId", authMiddleware, async (req, res) => {
   const targetId = req.params.userId;
 
   try {
+    // Check if target is the StreamBro support user
+    const target = await req.prisma.user.findUnique({ where: { id: targetId }, select: { role: true, username: true } });
+    if (target && (target.role === "SUPPORT" || target.username === "StreamBro")) {
+      return res.status(403).json({ error: "Нельзя удалить поддержку StreamBro" });
+    }
+
     const friendship = await req.prisma.friendship.findFirst({
       where: {
         OR: [
@@ -224,3 +254,4 @@ router.get("/search", authMiddleware, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.setPresence = setPresence;

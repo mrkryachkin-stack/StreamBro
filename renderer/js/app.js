@@ -639,6 +639,7 @@ async function _persistSettings(extra){
     // 1.1.0 — preserve sound + updates blocks (mutated in place by their UI panes)
     ...(S.settings&&S.settings.sound?{sound:S.settings.sound}:{}),
     ...(S.settings&&S.settings.updates?{updates:S.settings.updates}:{}),
+    ...(S.settings&&S.settings.friends?{friends:S.settings.friends}:{}),
     ...(extra||{}),
   };
   try{await window.electronAPI.settingsSave(payload);}catch(e){if(window.__sbDev) console.warn('[Settings] Save failed:',e.message);}
@@ -4362,4 +4363,5 @@ function _persistSettingsSafe() {
 
 document.addEventListener('DOMContentLoaded',init);
 window.msg = msg;
+window._scheduleSettingsSave = _scheduleSettingsSave;
 })();

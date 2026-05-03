@@ -299,6 +299,17 @@ class PresenceServer {
     this.prisma = prisma;
   }
 
+  // Send a message to a specific user (if online)
+  notifyUser(targetId, message) {
+    if (!targetId) return false;
+    const ws = this.connections.get(targetId);
+    if (ws) {
+      this._send(ws, message);
+      return true;
+    }
+    return false;
+  }
+
   _updateDbStatus(userId, status) {
     if (!this.prisma) return;
     const allowedStatuses = ["online", "streaming", "away", "dnd", "offline"];

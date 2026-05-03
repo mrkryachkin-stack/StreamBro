@@ -700,6 +700,13 @@ select option{
 .friend-actions{display:flex;align-items:center;gap:6px}
 .friend-remove{opacity:.5}
 .friend-remove:hover{opacity:1;color:var(--red)}
+.friend-notif-row{display:flex;align-items:center;justify-content:space-between;padding:2px 8px 4px 46px;font-size:0.72rem;color:var(--text2)}
+.friend-notif-label{white-space:nowrap}
+.friend-slider{cursor:pointer;display:inline-flex;align-items:center}
+.friend-slider-track{position:relative;width:32px;height:16px;border-radius:8px;background:var(--bg2);border:1px solid rgba(255,255,255,.1);transition:background .2s}
+.friend-slider.on .friend-slider-track{background:var(--accent);border-color:var(--accent)}
+.friend-slider-thumb{position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .2s}
+.friend-slider.on .friend-slider-thumb{left:18px}
 
 /* Pulsing envelope for unread */
 .mail-pulse{position:relative;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;animation:envelopePulse 1.6s ease-in-out infinite}
@@ -717,9 +724,10 @@ select option{
 .chat-empty{color:var(--muted);font-size:11px;text-align:center;padding:14px 4px;line-height:1.5}
 .chat-msg{display:flex;flex-direction:column;max-width:78%;padding:6px 9px;border-radius:10px;word-wrap:break-word;line-height:1.35}
 .chat-msg.me{align-self:flex-end;background:var(--accent-g);color:var(--text);border-bottom-right-radius:3px}
-.chat-msg.them{align-self:flex-start;background:rgba(127,127,127,.16);color:var(--text);border-bottom-left-radius:3px}
+.chat-msg.them{align-self:flex-start;background:var(--bg2);color:var(--text);border-bottom-left-radius:3px}
 .chat-msg-text{font-size:12px}
 .chat-msg-time{font-size:9px;color:var(--muted);margin-top:2px;align-self:flex-end}
+.chat-msg-edited{font-size:0.65rem;color:var(--muted);margin-left:4px}
 .chat-input-row{display:flex;gap:6px;margin-top:6px;align-items:center}
 .chat-input{flex:1;padding:6px 9px;border-radius:var(--r-sm);background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);font-size:12px;outline:none}
 .chat-input:focus{border-color:var(--accent)}

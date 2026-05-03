@@ -56,6 +56,40 @@ router.post("/setup", async (req, res) => {
 // All admin routes below require auth + admin role
 router.use(authMiddleware, adminMiddleware);
 
+// Helper: write audit log entry
+async function _audit(req, action, targetId, targetType, details) {
+  try {
+    await req.prisma.auditLog.create({
+      data: {
+        adminId: req.user.id,
+        action,
+        targetId: targetId || null,
+        targetType: targetType || null,
+        details: details ? JSON.stringify(details) : null,
+        ip: req.headers['x-forwarded-for'] || req.ip || null,
+      },
+    });
+  } catch (e) {
+    console.warn('[AUDIT] Failed to write audit log:', e.message);
+  }
+}
+
+// ─── GET /api/admin/audit ────────────────────────────────
+router.get("/audit", async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+    const logs = await req.prisma.auditLog.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: { admin: { select: { username: true, displayName: true } } },
+    });
+    res.json(logs);
+  } catch (err) {
+    console.error('[ADMIN] Audit log error:', err);
+    res.status(500).json({ error: 'Ошибка' });
+  }
+});
+
 // ─── GET /api/admin/stats ─────────────────────────────────
 router.get("/stats", async (req, res) => {
   try {
@@ -197,6 +231,8 @@ router.patch("/users/:id", async (req, res) => {
       data,
       select: { id: true, username: true, role: true, banned: true },
     });
+    await _audit(req, typeof banned === 'boolean' ? (banned ? 'ban_user' : 'unban_user') : 'update_user',
+      req.params.id, 'user', { role, banned, resetPassword: !!resetPassword });
     res.json(user);
   } catch (err) {
     console.error("[ADMIN] User update error:", err);
@@ -219,6 +255,7 @@ router.delete("/users/:id", async (req, res) => {
       where: { OR: [{ requesterId: req.params.id }, { addresseeId: req.params.id }] },
     });
 
+    await _audit(req, 'delete_user', req.params.id, 'user', null);
     await req.prisma.user.delete({ where: { id: req.params.id } });
     res.json({ ok: true });
   } catch (err) {
@@ -297,6 +334,19 @@ router.post("/announce", async (req, res) => {
         });
       }
     }
+    // Also save announcement as a message from StreamBro to all online users
+    const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (supportUser) {
+      const onlineUsers = Array.from(_presence?.connections?.keys() || []);
+      for (const userId of onlineUsers) {
+        try {
+          await req.prisma.message.create({
+            data: { senderId: supportUser.id, receiverId: userId, content: message.trim() },
+          });
+        } catch (e) { /* skip if friendship doesn't exist */ }
+      }
+    }
+
     res.json({ ok: true, sent: true });
   } catch (err) {
     console.error("[ADMIN] Announce error:", err);
@@ -304,4 +354,98 @@ router.post("/announce", async (req, res) => {
   }
 });
 
+// ─── GET /api/admin/feedback ──────────────────────────────
+// Get all conversations with the StreamBro support user
+router.get("/feedback", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (!supportUser) return res.json({ conversations: [] });
+
+    // Get all messages involving the support user, grouped by the other user
+    const messages = await req.prisma.message.findMany({
+      where: {
+        OR: [
+          { senderId: supportUser.id },
+          { receiverId: supportUser.id },
+        ],
+      },
+      include: {
+        sender: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+        receiver: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
+
+    // Group by conversation partner
+    const convMap = new Map();
+    for (const msg of messages) {
+      const partnerId = msg.senderId === supportUser.id ? msg.receiverId : msg.senderId;
+      const partner = msg.senderId === supportUser.id ? msg.receiver : msg.sender;
+      if (!convMap.has(partnerId)) {
+        convMap.set(partnerId, { partner, messages: [] });
+      }
+      convMap.get(partnerId).messages.push({
+        id: msg.id,
+        content: msg.content,
+        fromSupport: msg.senderId === supportUser.id,
+        edited: msg.edited,
+        createdAt: msg.createdAt,
+      });
+    }
+
+    const conversations = Array.from(convMap.values()).map(c => ({
+      ...c,
+      lastMessage: c.messages[0],
+      unread: c.messages.filter(m => !m.fromSupport && !m.read).length,
+    }));
+
+    res.json({ conversations });
+  } catch (err) {
+    console.error("[ADMIN] Feedback error:", err);
+    res.status(500).json({ error: "Ошибка получения обратной связи" });
+  }
+});
+
+// ─── POST /api/admin/feedback/reply ──────────────────────
+// Reply to a user as the StreamBro support user
+router.post("/feedback/reply", authMiddleware, adminMiddleware, async (req, res) => {
+  const { userId, content } = req.body;
+  if (!userId || !content) return res.status(400).json({ error: "Укажите userId и content" });
+
+  try {
+    const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (!supportUser) return res.status(404).json({ error: "Support user not found" });
+
+    const message = await req.prisma.message.create({
+      data: {
+        senderId: supportUser.id,
+        receiverId: userId,
+        content: content.slice(0, 2000),
+      },
+    });
+
+    // Push message via presence if user is online
+    if (_presence) {
+      _presence.notifyUser(userId, {
+        type: "chat",
+        senderId: supportUser.id,
+        content: message.content,
+        messageId: message.id,
+        timestamp: Date.now(),
+      });
+    }
+
+    res.json({ ok: true, message });
+  } catch (err) {
+    console.error("[ADMIN] Feedback reply error:", err);
+    res.status(500).json({ error: "Ошибка отправки ответа" });
+  }
+});
+
 module.exports = router;
+
+// Presence server reference for push notifications
+let _presence = null;
+function setPresence(p) { _presence = p; }
+module.exports.setPresence = setPresence;

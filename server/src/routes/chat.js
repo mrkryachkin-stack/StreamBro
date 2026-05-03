@@ -2,6 +2,10 @@ const express = require("express");
 const router = express.Router();
 const { authMiddleware } = require("../middleware/auth");
 
+// Presence server reference — set from index.js
+let _presence = null;
+function setPresence(presenceServer) { _presence = presenceServer; }
+
 // ─── GET /api/chat/:userId ────────────────────────────────
 // Get chat history with a specific user
 router.get("/:userId", authMiddleware, async (req, res) => {
@@ -72,6 +76,17 @@ router.post("/:userId", authMiddleware, async (req, res) => {
       },
     });
 
+    // Push real-time notification to receiver via Presence WS
+    if (_presence) {
+      _presence.notifyUser(receiverId, {
+        type: "chat",
+        senderId: req.user.id,
+        content: content.trim(),
+        messageId: message.id,
+        timestamp: Date.now(),
+      });
+    }
+
     res.status(201).json(message);
   } catch (err) {
     console.error("[CHAT] Send error:", err);
@@ -93,9 +108,9 @@ router.patch("/message/:messageId", authMiddleware, async (req, res) => {
     if (!message) return res.status(404).json({ error: "Сообщение не найдено" });
     if (message.senderId !== req.user.id) return res.status(403).json({ error: "Можно редактировать только свои сообщения" });
 
-    // 24h edit window
-    const hoursSinceCreation = (Date.now() - new Date(message.createdAt).getTime()) / 3600000;
-    if (hoursSinceCreation > 24) return res.status(400).json({ error: "Время редактирования истекло (24ч)" });
+    // 2-minute edit window
+    const msSinceCreation = Date.now() - new Date(message.createdAt).getTime();
+    if (msSinceCreation > 2 * 60 * 1000) return res.status(400).json({ error: "Редактировать можно только в течение 2 минут" });
 
     const updated = await req.prisma.message.update({
       where: { id: messageId },
@@ -141,4 +156,4 @@ router.get("/unread/count", authMiddleware, async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = { router, setPresence };

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self' blob: data:;
-                 img-src 'self' data: blob: avatar: https://streambro.ru;
+                 img-src 'self' data: blob: avatar: https:;
                  media-src 'self' blob: mediastream:;
                  style-src 'self' 'unsafe-inline';
                  script-src 'self';
@@ -100,6 +100,12 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
                 Добавить друга
               </button>
+            </div>
+            <div class="friends-notif-toggles" style="display:flex;gap:0.8rem;padding:0.4rem 0;font-size:0.78rem;color:var(--text2);align-items:center">
+              <span>🔊</span>
+              <div class="friend-slider on" id="globalNotifSound" style="cursor:pointer;display:inline-flex;align-items:center"><span class="friend-slider-track"><span class="friend-slider-thumb"></span></span></div>
+              <span style="margin-left:0.3rem">🔔</span>
+              <div class="friend-slider on" id="globalNotifBadge" style="cursor:pointer;display:inline-flex;align-items:center"><span class="friend-slider-track"><span class="friend-slider-thumb"></span></span></div>
             </div>
             <div class="friends-list" id="friendsList"></div>
           </div>
@@ -332,9 +338,13 @@
           <div class="welcome-buttons">
             <button class="btn btn-accent" id="welcomeBtnSignup">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
-              Регистрация на сайте
+              Регистрация
             </button>
             <button class="btn" id="welcomeBtnLogin">У меня уже есть аккаунт</button>
+            <div style="display:flex;gap:0.5rem;margin-top:0.3rem;width:100%">
+              <button class="btn" id="welcomeBtnGoogle" style="flex:1;font-size:0.82rem">Войти через Google</button>
+              <button class="btn" id="welcomeBtnVK" style="flex:1;font-size:0.82rem">Войти через VK</button>
+            </div>
             <button class="btn btn-ghost" id="welcomeBtnDev">Пропустить — локальный профиль</button>
           </div>
           <div class="welcome-signup-hint" id="welcomeSignupHint" style="display:none">

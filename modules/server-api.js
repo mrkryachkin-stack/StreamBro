@@ -299,11 +299,28 @@ function presenceConnect() {
           timestamp: msg.timestamp,
         });
         break;
+
+      case 'friend-accepted':
+        // Someone accepted our friend request — trigger sync
+        win.webContents.send('friends-changed', { reason: 'friend-accepted', userId: msg.userId });
+        break;
+
+      case 'friend-request':
+        // New incoming friend request — trigger refresh
+        win.webContents.send('friends-changed', { reason: 'friend-request', userId: msg.userId });
+        break;
     }
   });
 
   _presenceWs.on('close', () => {
-    console.log('[Presence] Disconnected');
+    console.log('[Presence] Disconnected — reconnecting in 5s');
+    if (_presenceWs) { _presenceWs = null; }
+    setTimeout(() => {
+      if (profileManager.getToken()) {
+        console.log('[Presence] Reconnecting...');
+        presenceConnect();
+      }
+    }, 5000);
   });
 
   _presenceWs.on('error', (err) => {

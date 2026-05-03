@@ -51,7 +51,8 @@ function adminFetch(path: string, options: RequestInit = {}) {
   return fetch(path, { ...options, headers, credentials: "include" });
 }
 
-interface FeedbackConv { partner: { id: string; username: string; displayName: string | null; avatarUrl: string | null }; messages: { id: string; content: string; fromSupport: boolean; edited: boolean; createdAt: string }[]; lastMessage: { id: string; content: string; fromSupport: boolean; edited: boolean; createdAt: string }; unread: number }
+interface FeedbackMsg { id: string; content: string; fromSupport: boolean; edited: boolean; read: boolean; createdAt: string }
+interface FeedbackConv { partner: { id: string; username: string; displayName: string | null; avatarUrl: string | null }; messages: FeedbackMsg[]; lastMessage: FeedbackMsg; unread: number }
 
 function FeedbackSection() {
   const [convos, setConvos] = useState<FeedbackConv[]>([]);
@@ -92,30 +93,71 @@ function FeedbackSection() {
 
   return (
     <div style={{ display: "flex", gap: "1rem", minHeight: 400 }}>
-      <div style={{ flex: "0 0 260px", overflowY: "auto", borderRight: "1px solid rgba(255,255,255,0.06)", paddingRight: "1rem" }}>
-        <div style={{ color: "#94a3b8", fontSize: "0.8rem", marginBottom: "0.5rem" }}>{"Пользователи"}</div>
-        {convos.map(c => (
-          <div key={c.partner.id} onClick={() => setSelectedId(c.partner.id)} style={{ padding: "0.5rem 0.6rem", borderRadius: 6, cursor: "pointer", marginBottom: 4, background: selectedId === c.partner.id ? "rgba(139,92,246,0.12)" : "transparent" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>{c.partner.displayName || c.partner.username}</span>
-              {c.unread > 0 && <span style={{ fontSize: "0.7rem", background: "#ef4444", color: "#fff", borderRadius: 8, padding: "0.1rem 0.4rem" }}>{c.unread}</span>}
+      <div style={{ flex: "0 0 280px", overflowY: "auto", borderRight: "1px solid rgba(255,255,255,0.06)", paddingRight: "1rem" }}>
+        <div style={{ color: "#94a3b8", fontSize: "0.8rem", marginBottom: "0.5rem", display: "flex", justifyContent: "space-between" }}>
+          <span>Обращения</span>
+          <span style={{ color: convos.reduce((s,c) => s + c.unread, 0) > 0 ? "#ef4444" : "#64748b" }}>
+            Новых: {convos.reduce((s,c) => s + c.unread, 0)}
+          </span>
+        </div>
+        {convos.slice().sort((a,b) => b.unread - a.unread || (new Date(b.lastMessage?.createdAt || 0).getTime() - new Date(a.lastMessage?.createdAt || 0).getTime())).map(c => {
+          const hasUnread = c.unread > 0;
+          return (
+            <div key={c.partner.id} onClick={() => setSelectedId(c.partner.id)} style={{
+              padding: "0.55rem 0.65rem",
+              borderRadius: 6,
+              cursor: "pointer",
+              marginBottom: 4,
+              background: selectedId === c.partner.id
+                ? "rgba(139,92,246,0.18)"
+                : hasUnread ? "rgba(239,68,68,0.08)" : "transparent",
+              borderLeft: hasUnread ? "3px solid #ef4444" : (selectedId === c.partner.id ? "3px solid #8b5cf6" : "3px solid transparent"),
+              transition: "background 0.15s",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: "0.85rem", fontWeight: hasUnread ? 700 : 600, color: hasUnread ? "#fef2f2" : "#e2e8f0" }}>{c.partner.displayName || c.partner.username}</span>
+                {hasUnread && <span style={{ fontSize: "0.7rem", background: "#ef4444", color: "#fff", borderRadius: 10, padding: "0.1rem 0.45rem", fontWeight: 700 }}>{c.unread}</span>}
+              </div>
+              <div style={{ fontSize: "0.75rem", color: hasUnread ? "#fca5a5" : "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>
+                {c.lastMessage?.fromSupport ? "Вы: " : ""}{c.lastMessage?.content?.slice(0, 50)}
+              </div>
             </div>
-            <div style={{ fontSize: "0.75rem", color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.lastMessage?.content?.slice(0, 40)}</div>
-          </div>
-        ))}
+          );
+        })}
         {convos.length === 0 && <div style={{ color: "#64748b", fontSize: "0.85rem" }}>{"Нет обращений"}</div>}
       </div>
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
         {selected ? (
           <>
-            <div style={{ fontWeight: 700, marginBottom: "0.5rem", fontSize: "0.95rem" }}>{selected.partner.displayName || selected.partner.username}</div>
-            <div style={{ flex: 1, overflowY: "auto", marginBottom: "0.5rem", maxHeight: 350 }}>
-              {msgs.slice().reverse().map(m => (
-                <div key={m.id} style={{ marginBottom: "0.4rem", textAlign: m.fromSupport ? "right" : "left" }}>
-                  <span style={{ display: "inline-block", padding: "0.4rem 0.7rem", borderRadius: 8, fontSize: "0.85rem", background: m.fromSupport ? "rgba(139,92,246,0.15)" : "rgba(255,255,255,0.06)", maxWidth: "80%" }}>{m.content}</span>
-                  <div style={{ fontSize: "0.65rem", color: "#475569" }}>{new Date(m.createdAt).toLocaleString()}</div>
-                </div>
-              ))}
+            <div style={{ fontWeight: 700, marginBottom: "0.5rem", fontSize: "0.95rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{selected.partner.displayName || selected.partner.username}</span>
+              <span style={{ fontSize: "0.7rem", color: "#64748b", fontWeight: 400 }}>@{selected.partner.username}</span>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", marginBottom: "0.5rem", maxHeight: 350, padding: "0.25rem 0.4rem" }}>
+              {msgs.slice().reverse().map(m => {
+                const isUnread = !m.fromSupport && !m.read;
+                return (
+                  <div key={m.id} style={{ marginBottom: "0.5rem", textAlign: m.fromSupport ? "right" : "left", position: "relative" }}>
+                    <span style={{
+                      display: "inline-block",
+                      padding: "0.45rem 0.75rem",
+                      borderRadius: 10,
+                      fontSize: "0.85rem",
+                      background: m.fromSupport ? "rgba(139,92,246,0.18)" : (isUnread ? "rgba(239,68,68,0.18)" : "rgba(255,255,255,0.06)"),
+                      border: isUnread ? "1px solid rgba(239,68,68,0.5)" : "1px solid transparent",
+                      maxWidth: "80%",
+                      boxShadow: isUnread ? "0 0 8px rgba(239,68,68,0.2)" : "none",
+                    }}>
+                      {isUnread && <span style={{ display: "inline-block", marginRight: 6, fontSize: "0.65rem", background: "#ef4444", color: "#fff", borderRadius: 4, padding: "0.05rem 0.35rem", fontWeight: 700, verticalAlign: "middle" }}>NEW</span>}
+                      {m.content}
+                      {m.edited && <span style={{ marginLeft: 6, fontSize: "0.65rem", color: "#64748b", fontStyle: "italic" }}>(ред.)</span>}
+                    </span>
+                    <div style={{ fontSize: "0.65rem", color: isUnread ? "#fca5a5" : "#475569", marginTop: 2 }}>
+                      {m.fromSupport ? "Вы → пользователь" : isUnread ? "✉ Не прочитано" : "✓ Прочитано"} · {new Date(m.createdAt).toLocaleString()}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
             <div style={{ display: "flex", gap: "0.5rem" }}>
               <input value={replyText} onChange={e => setReplyText(e.target.value)} placeholder="Ответить..." style={{ flex: 1, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "0.5rem", color: "#e2e8f0", fontSize: "0.85rem" }} onKeyDown={e => { if (e.key === "Enter") handleReply(); }} />

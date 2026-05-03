@@ -38,17 +38,31 @@
   const SERVER_BASE = 'https://streambro.ru';
   function _avatarUrl(url) {
     if (!url) return '';
-    if (url.startsWith('/')) return SERVER_BASE + url;
-    return url;
+    const s = String(url).trim();
+    if (!s) return '';
+    if (s.startsWith('http://') || s.startsWith('https://') || s.startsWith('data:') || s.startsWith('blob:')) return s;
+    if (s.startsWith('avatar:')) return s;
+    if (s.startsWith('/')) return SERVER_BASE + s;
+    // Plain filename like "abc.jpg" → assume uploads dir
+    if (/\.(jpg|jpeg|png|gif|webp)$/i.test(s)) return SERVER_BASE + '/api/user/avatars/' + s;
+    return s;
   }
   function _avatarImg(url, nick) {
     const resolved = _avatarUrl(url);
-    if (resolved && (resolved.startsWith('http') || resolved.startsWith('avatar:'))) {
-      return `<img src="${_escape(resolved)}" alt="" referrerpolicy="no-referrer" onerror="this.onerror=null;this.style.display='none';if(this.nextSibling)this.nextSibling.style.display='flex';"/>` +
-             `<span class="avatar-initials" style="display:none">${_escape(_initials(nick))}</span>`;
+    if (resolved && /^(https?|data|blob):/i.test(resolved)) {
+      const safe = _escape(resolved);
+      return `<img src="${safe}" alt="" referrerpolicy="no-referrer" crossorigin="anonymous" style="width:100%;height:100%;object-fit:cover;display:block" onerror="this.onerror=null;this.remove();var s=this.parentNode&&this.parentNode.querySelector('.avatar-initials');if(s)s.style.display='flex';"/>` +
+             `<span class="avatar-initials" style="display:none;width:100%;height:100%;align-items:center;justify-content:center">${_escape(_initials(nick))}</span>`;
     }
-    if (resolved && resolved.length <= 4) return _escape(resolved);
-    return `<span class="avatar-initials">${_escape(_initials(nick))}</span>`;
+    if (resolved && resolved.startsWith('avatar:')) {
+      // Emoji avatar like avatar:🐱
+      const emoji = resolved.slice(7);
+      return `<span style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:1.1em">${_escape(emoji)}</span>`;
+    }
+    if (resolved && resolved.length <= 4) {
+      return `<span style="display:flex;align-items:center;justify-content:center;width:100%;height:100%">${_escape(resolved)}</span>`;
+    }
+    return `<span class="avatar-initials" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%">${_escape(_initials(nick))}</span>`;
   }
 
   function _myUserId() {
@@ -135,20 +149,19 @@
       const isSupport = _isSupportFriend(f);
       const soundOn = _isNotifSoundOn(f.id);
       return `
-        <div class="friend-item ${isExpanded ? 'expanded' : ''}" data-fid="${_escape(f.id)}">
+        <div class="friend-item ${isExpanded ? 'expanded' : ''} ${hasMail ? 'has-unread' : ''}" data-fid="${_escape(f.id)}">
           <div class="friend-row" data-action="toggle">
             <div class="friend-avatar">
               ${_avatarImg(f.avatar, f.nickname)}
               <span class="friend-status-dot status-${_escape(f.status || 'offline')}" title="${_escape(STATUS_LABELS[f.status] || 'Offline')}"></span>
             </div>
             <div class="friend-meta">
-              <div class="friend-nick">${_escape(f.nickname)}${isSupport ? ' <span style="font-size:0.65rem;background:var(--accent);color:#000;padding:0.1rem 0.35rem;border-radius:4px;font-weight:700;vertical-align:middle;margin-left:0.3rem">Поддержка</span>' : ''}</div>
+              <div class="friend-nick">${_escape(f.nickname)}${isSupport ? ' <span style="font-size:0.65rem;background:var(--accent);color:#000;padding:0.1rem 0.35rem;border-radius:4px;font-weight:700;vertical-align:middle;margin-left:0.3rem">Поддержка</span>' : ''}${hasMail ? ` <span class="friend-new-msg">+${unread > 9 ? '9+' : unread}</span>` : ''}</div>
               <div class="friend-status-text">${STATUS_ICONS[f.status] || '⚫'} ${_escape(STATUS_LABELS[f.status] || 'Не в сети')}</div>
             </div>
             <div class="friend-actions">
               ${hasMail ? `<span class="mail-pulse" title="Новое сообщение">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-                <span class="mail-pulse-count">${unread > 9 ? '9+' : unread}</span>
               </span>` : ''}
               ${!isSupport ? `<button class="btn-icon sm friend-remove" data-action="remove" title="Удалить из друзей">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -156,7 +169,7 @@
             </div>
           </div>
           <div class="friend-notif-row" style="display:flex;align-items:center;gap:0.5rem;padding:0.2rem 0.6rem 0.4rem">
-            <button type="button" class="friend-notif-btn" data-action="toggle-sound" data-state="${soundOn ? '1' : '0'}" style="cursor:pointer;background:${soundOn ? '#16a34a' : '#dc2626'};color:#fff;border:none;border-radius:4px;padding:0.18rem 0.5rem;font-size:0.7rem;font-weight:600;line-height:1.2">🔊 Звук: ${soundOn ? 'ВКЛ' : 'ВЫКЛ'}</button>
+            <button type="button" class="notif-pill" data-action="toggle-sound" data-state="${soundOn ? '1' : '0'}">Звук: ${soundOn ? 'ВКЛ' : 'ВЫКЛ'}</button>
           </div>
         </div>`;
     }).join('');
@@ -184,13 +197,10 @@
       soundBtn && soundBtn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const cur = _isNotifSoundOn(fid); // current state
-        const newVal = !cur;
+        const newVal = !_isNotifSoundOn(fid);
         _setPerFriend(fid, 'sound', newVal);
-        soundBtn.dataset.state = newVal ? '1' : '0';
-        soundBtn.textContent = '🔊 Звук: ' + (newVal ? 'ВКЛ' : 'ВЫКЛ');
-        soundBtn.style.background = newVal ? '#16a34a' : '#dc2626';
-        soundBtn.style.color = '#ffffff';
+        soundBtn.setAttribute('data-state', newVal ? '1' : '0');
+        soundBtn.textContent = 'Звук: ' + (newVal ? 'ВКЛ' : 'ВЫКЛ');
       });
     });
   }
@@ -307,11 +317,11 @@
       _loadChatFromServer(friendId, true);
     }
 
-    // Mark read + update badge
-    window.electronAPI.friendsMarkRead(friendId).catch(() => {});
+    // Mark read + update badge IMMEDIATELY (optimistic UI), then async server call
     _unread[friendId] = 0;
     _renderList();
     _updateBadge();
+    window.electronAPI.friendsMarkRead(friendId).catch(() => {});
   }
 
   function _closeChat() {
@@ -562,21 +572,11 @@
   }
 
   // ─── Global notification toggle buttons (top of friends panel) ───
-  // White text on solid colored background — high contrast.
-  function _styleNotifBtn(btn, on, label) {
+  // Pill-shaped, themed bg, colored border (green=on, red=off). Class-only styling.
+  function _setNotifPill(btn, on, label) {
     if (!btn) return;
-    btn.dataset.state = on ? '1' : '0';
+    btn.setAttribute('data-state', on ? '1' : '0');
     btn.textContent = label + ': ' + (on ? 'ВКЛ' : 'ВЫКЛ');
-    btn.style.background = on ? '#16a34a' : '#dc2626';
-    btn.style.color = '#ffffff';
-    btn.style.border = 'none';
-    btn.style.borderRadius = '4px';
-    btn.style.padding = '0.18rem 0.5rem';
-    btn.style.fontSize = '0.7rem';
-    btn.style.fontWeight = '600';
-    btn.style.cursor = 'pointer';
-    btn.style.lineHeight = '1.2';
-    btn.style.transition = 'background 0.15s';
   }
   let _notifWired = false;
   function _wireGlobalNotifSliders() {
@@ -584,8 +584,8 @@
     const badgeBtn = $('globalNotifBadge');
     const n = _getGlobalNotif();
 
-    if (soundBtn) _styleNotifBtn(soundBtn, n.sound !== false, '🔊 Звук');
-    if (badgeBtn) _styleNotifBtn(badgeBtn, n.badge !== false, '🔔 Бейдж');
+    if (soundBtn) _setNotifPill(soundBtn, n.sound !== false, 'Звук');
+    if (badgeBtn) _setNotifPill(badgeBtn, n.badge !== false, 'Уведомления');
 
     if (_notifWired) return; // attach listeners only once
     _notifWired = true;
@@ -594,9 +594,9 @@
       soundBtn.addEventListener('click', (e) => {
         e.preventDefault(); e.stopPropagation();
         const cur = _getGlobalNotif();
-        const newVal = !(cur.sound !== false); // current ON → make OFF; current OFF → make ON
+        const newVal = !(cur.sound !== false);
         _setGlobalNotif('sound', newVal);
-        _styleNotifBtn(soundBtn, newVal, '🔊 Звук');
+        _setNotifPill(soundBtn, newVal, 'Звук');
       });
     }
     if (badgeBtn) {
@@ -605,7 +605,7 @@
         const cur = _getGlobalNotif();
         const newVal = !(cur.badge !== false);
         _setGlobalNotif('badge', newVal);
-        _styleNotifBtn(badgeBtn, newVal, '🔔 Бейдж');
+        _setNotifPill(badgeBtn, newVal, 'Уведомления');
         _updateBadge();
       });
     }
@@ -617,6 +617,8 @@
       _friends = await window.electronAPI.friendsList();
       _unread  = await window.electronAPI.friendsUnread();
     } catch (e) { _friends = []; _unread = {}; }
+    // Active chat is being viewed → keep its unread at 0
+    if (_expanded) _unread[_expanded] = 0;
     _renderList();
     _updateBadge();
     // Update chat header status if open

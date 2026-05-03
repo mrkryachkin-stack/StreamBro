@@ -708,6 +708,51 @@ select option{
 .friend-slider-thumb{position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:#fff;transition:left .2s}
 .friend-slider.on .friend-slider-thumb{left:18px}
 
+/* Notification toggle pill buttons (oval, themed bg, colored border) */
+.notif-pill{
+  display:inline-flex;align-items:center;justify-content:center;gap:4px;
+  cursor:pointer;
+  background:var(--bg2)!important;
+  color:var(--text)!important;
+  border:1.5px solid var(--glass-border)!important;
+  border-radius:999px!important;
+  padding:0.22rem 0.7rem!important;
+  font-size:0.7rem!important;
+  font-weight:600!important;
+  line-height:1.15!important;
+  transition:border-color .15s,box-shadow .15s,background .15s!important;
+  user-select:none;
+  outline:none;
+}
+.notif-pill:hover{background:var(--bg3,#2a2a48)!important}
+.notif-pill[data-state="1"]{
+  border-color:#22c55e!important;
+  color:#86efac!important;
+  box-shadow:0 0 0 1px rgba(34,197,94,.15) inset,0 0 8px rgba(34,197,94,.18)!important;
+}
+.notif-pill[data-state="0"]{
+  border-color:#ef4444!important;
+  color:#fca5a5!important;
+  box-shadow:0 0 0 1px rgba(239,68,68,.15) inset,0 0 8px rgba(239,68,68,.18)!important;
+}
+/* New message badge on friend card */
+.friend-new-msg{
+  display:inline-flex;align-items:center;gap:3px;
+  background:var(--accent);color:#fff;
+  font-size:0.65rem;font-weight:700;
+  padding:0.1rem 0.45rem;border-radius:999px;
+  margin-left:0.3rem;
+  animation:newMsgPulse 1.5s ease-in-out infinite;
+}
+@keyframes newMsgPulse{
+  0%,100%{box-shadow:0 0 0 0 var(--accent)}
+  50%{box-shadow:0 0 0 4px rgba(139,92,246,0.0)}
+}
+.friend-item.has-unread{
+  background:linear-gradient(90deg,rgba(139,92,246,0.08),transparent 70%);
+  border-left:2px solid var(--accent);
+}
+
 /* Pulsing envelope for unread */
 .mail-pulse{position:relative;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;animation:envelopePulse 1.6s ease-in-out infinite}
 .mail-pulse-count{position:absolute;top:-6px;right:-7px;background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:8px;min-width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;padding:0 3px;border:1.5px solid var(--bg1)}

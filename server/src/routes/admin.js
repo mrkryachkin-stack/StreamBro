@@ -390,6 +390,7 @@ router.get("/feedback", authMiddleware, adminMiddleware, async (req, res) => {
         content: msg.content,
         fromSupport: msg.senderId === supportUser.id,
         edited: msg.edited,
+        read: msg.read,
         createdAt: msg.createdAt,
       });
     }

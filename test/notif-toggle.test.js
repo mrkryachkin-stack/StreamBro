@@ -20,11 +20,20 @@ function setupDOM() {
   // Build a button mock
   function makeBtn(id) {
     const listeners = [];
+    const attrs = {};
     const btn = {
       id,
       style: {},
       dataset: {},
       textContent: '',
+      setAttribute(name, val) {
+        attrs[name] = val;
+        if (name.startsWith('data-')) {
+          const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+          this.dataset[key] = val;
+        }
+      },
+      getAttribute(name) { return attrs[name]; },
       addEventListener: (type, fn) => { listeners.push({ type, fn }); },
       removeEventListener: () => {},
       cloneNode: () => makeBtn(id),

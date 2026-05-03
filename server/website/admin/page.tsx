@@ -57,11 +57,28 @@ function FeedbackSection() {
   const [convos, setConvos] = useState<FeedbackConv[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
-  const [sent, setSent] = useState(false);
+  const [sent, setSent] = useState(0);
 
+  // Auto-poll every 10s for new messages
   useEffect(() => {
-    adminFetch("/api/admin/feedback").then(r => r.json()).then(d => { if (d.conversations) setConvos(d.conversations); }).catch(() => {});
+    const load = () => {
+      adminFetch("/api/admin/feedback").then(r => r.json()).then(d => { if (d.conversations) setConvos(d.conversations); }).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
   }, [sent]);
+
+  // Mark as read when opening a conversation
+  useEffect(() => {
+    if (!selectedId) return;
+    adminFetch(`/api/admin/feedback/${selectedId}/read`, { method: "POST" })
+      .then(() => {
+        // Optimistically clear unread badge
+        setConvos(prev => prev.map(c => c.partner.id === selectedId ? { ...c, unread: 0 } : c));
+      })
+      .catch(() => {});
+  }, [selectedId]);
 
   const selected = convos.find(c => c.partner.id === selectedId);
   const msgs = selected?.messages || [];
@@ -70,7 +87,7 @@ function FeedbackSection() {
     if (!selectedId || !replyText.trim()) return;
     await adminFetch("/api/admin/feedback/reply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId: selectedId, content: replyText.trim() }) });
     setReplyText("");
-    setSent(!sent);
+    setSent(s => s + 1);
   };
 
   return (

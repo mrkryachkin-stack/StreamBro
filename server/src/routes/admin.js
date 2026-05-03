@@ -394,16 +394,51 @@ router.get("/feedback", authMiddleware, adminMiddleware, async (req, res) => {
       });
     }
 
+    // Need to know read status for unread count
+    const fullMessages = await req.prisma.message.findMany({
+      where: {
+        senderId: { not: supportUser.id },
+        receiverId: supportUser.id,
+        read: false,
+      },
+      select: { id: true, senderId: true },
+    });
+    const unreadBySender = {};
+    for (const m of fullMessages) {
+      unreadBySender[m.senderId] = (unreadBySender[m.senderId] || 0) + 1;
+    }
+
     const conversations = Array.from(convMap.values()).map(c => ({
       ...c,
       lastMessage: c.messages[0],
-      unread: c.messages.filter(m => !m.fromSupport && !m.read).length,
+      unread: unreadBySender[c.partner.id] || 0,
     }));
 
     res.json({ conversations });
   } catch (err) {
     console.error("[ADMIN] Feedback error:", err);
     res.status(500).json({ error: "Ошибка получения обратной связи" });
+  }
+});
+
+// ─── POST /api/admin/feedback/:userId/read ──────────────────
+// Mark all messages from this user (to support) as read
+router.post("/feedback/:userId/read", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (!supportUser) return res.status(404).json({ error: "Support user not found" });
+    await req.prisma.message.updateMany({
+      where: {
+        senderId: req.params.userId,
+        receiverId: supportUser.id,
+        read: false,
+      },
+      data: { read: true },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[ADMIN] Mark read error:", err);
+    res.status(500).json({ error: "Ошибка" });
   }
 });
 

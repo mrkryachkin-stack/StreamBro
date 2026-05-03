@@ -1158,27 +1158,29 @@ ipcMain.handle('profile-register', async (_e, { email, username, password }) => 
 });
 
 // ─── Friends IPC (1.1.0) — hybrid: server API when authenticated, local fallback ───
+function _normAvatar(url) {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('avatar:')) return url;
+  if (url.startsWith('/')) return 'https://streambro.ru' + url;
+  return url;
+}
 ipcMain.handle('friends-list',        async () => {
   const token = profileMgr.getToken();
   if (token) {
-    // Use cached data from friendsStore (synced periodically via friends-sync)
-    // instead of making HTTP request on every refresh()
     const cached = friendsStore.listFriends();
-    if (cached && cached.length > 0) return cached;
-    // Fallback to direct API if cache is empty
+    if (cached && cached.length > 0) return cached.map(f => ({ ...f, avatar: _normAvatar(f.avatar) }));
     const r = await serverApi.friendsList();
     if (r.ok && Array.isArray(r.data)) {
-      // Map server fields to the format UI expects
       return r.data.map(f => ({
         id: f.id,
         serverId: f.id,
         nickname: f.displayName || f.username || 'Друг',
-        avatar: f.avatarUrl || '',
+        avatar: _normAvatar(f.avatarUrl || ''),
         status: f.status || 'offline',
       }));
     }
   }
-  return friendsStore.listFriends();
+  return friendsStore.listFriends().map(f => ({ ...f, avatar: _normAvatar(f.avatar) }));
 });
 ipcMain.handle('friends-requests',    async () => {
   const token = profileMgr.getToken();
@@ -1211,7 +1213,11 @@ ipcMain.handle('friends-send-msg',    async (_e, payload) => {
   const token = profileMgr.getToken();
   if (token && payload.friendId && payload.text) {
     const r = await serverApi.chatSend(payload.friendId, payload.text);
-    if (r.ok) return r.data;
+    if (r.ok) {
+      const m = r.data || {};
+      return { success: true, ok: true, id: m.id || m.messageId, msg: m };
+    }
+    return { success: false, ok: false, error: r.error || 'send failed' };
   }
   return friendsStore.sendMessage({ ...payload, fromMe: true });
 });

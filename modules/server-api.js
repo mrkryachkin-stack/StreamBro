@@ -240,9 +240,16 @@ function presenceConnect() {
       case 'chat':
         win.webContents.send('friends-message', {
           friendId: msg.senderId,
-          text: msg.content,
-          messageId: msg.messageId,
-          timestamp: msg.timestamp,
+          msg: {
+            id: msg.messageId,
+            messageId: msg.messageId,
+            text: msg.content,
+            content: msg.content,
+            senderId: msg.senderId,
+            from: msg.senderId,
+            ts: msg.timestamp || Date.now(),
+            createdAt: new Date(msg.timestamp || Date.now()).toISOString(),
+          },
         });
         break;
 

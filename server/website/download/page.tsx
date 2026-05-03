@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
 
-const FALLBACK_VERSION = "1.2.2";
+const FALLBACK_VERSION = "1.3.1";
 
 export default function DownloadPage() {
   const [version, setVersion] = useState(FALLBACK_VERSION);
@@ -136,7 +136,7 @@ export default function DownloadPage() {
                 "RTMP стриминг (Twitch/YouTube/Kick)",
                 "Запись в MP4",
                 "Сцены и источники",
-                "Шумодав + EQ + компрессор",
+                "Продвинутый шумодав + EQ + компрессор",
                 "P2P со-стрим (WebRTC)",
                 "4 темы оформления",
                 "Системный звук (WASAPI)",

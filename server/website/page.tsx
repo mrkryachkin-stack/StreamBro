@@ -7,33 +7,30 @@ import Image from "next/image";
 /* ═══════════════════════════════════════════════════════════════
    VERSION & CHANGELOG DATA
    ═══════════════════════════════════════════════════════════════ */
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 const CHANGES: Record<string, string[]> = {
+  "1.3.1": [
+    "Стрим на Kick теперь работает стабильно — автофallback GPU → CPU энкодер",
+    "Продвинутый шумодав: 4 пресета + индикатор состояния + уровень сигнала",
+    "Стабильное подключение: автопереключение на программный кодек если GPU недоступен",
+  ],
   "1.3.0": [
-    "Electron 41 — Chromium 134, закрыто 12 CVE безопасности",
-    "Виртуальная камера — сцена StreamBro как вебкамера в Zoom/Discord",
-    "AI шумоподавление RNNoise (WASM AudioWorklet)",
-    "GPU-кодировщик NVENC / AMF / QSV — -80% CPU при стриме",
-    "Мастер первого запуска — 4-шаговый onboarding",
-    "2FA TOTP для административной панели",
-    "Swagger API-документация на /api/docs",
-    "E2E smoke-тесты, CI/CD GitHub Actions",
-    "Ленивая загрузка модулей, Sentry error tracking",
+    "Виртуальная камера — сцена StreamBro как вебкамера в Zoom, Discord, Teams",
+    "GPU-кодировщик NVENC / AMF / QSV — снижает нагрузку на процессор при стриме",
+    "Мастер первого запуска — 4 шага от скачивания до первого стрима",
+    "Electron 41 — актуальный Chromium, закрыты известные уязвимости",
   ],
   "1.2.5": [
     "Полный редизайн сайта — Dark Gold Futurism",
-    "Кастомный курсор с инерцией и hover-реакциями",
     "Микро-анимации: parallax, tilt, scroll-reveal",
   ],
   "1.2.2": [
-    "Чат — редактирование и удаление своих сообщений",
-    "Аватарки друзей теперь отображаются корректно",
+    "Чат — редактирование и удаление сообщений",
     "Онлайн-статус синхронизирован между приложением и сайтом",
     "Комнаты со-стрима — стабильное создание и автозакрытие",
   ],
   "1.2.0": [
     "WebGL рендеринг — GPU-ускоренный композитор",
-    "WebCodecs H.264 — стрим без перекодирования",
     "Предпросмотр 30fps, выходной 30/60/120fps",
     "30-50% экономия CPU, 200-400 МБ RAM",
   ],
@@ -339,14 +336,14 @@ function Hero({ onChangelog, downloadUrl }: { onChangelog: () => void; downloadU
 const FEATURES = [
   { icon: "stream", title: "RTMP стриминг", desc: "Twitch, YouTube, Kick — настоящий RTMP через FFmpeg. Автопереподключение, защита от зависаний.", tag: "Ключевое", span: 2 },
   { icon: "scene", title: "Композитор сцен", desc: "Камера, экран, окно — перетаскивай, вращай, обрезай. Маски, рамки со свечением.", tag: null, span: 1 },
-  { icon: "audio", title: "Аудиомикшер с FX", desc: "Шумодав, 3-полосный EQ, компрессор, лимитер — для каждого источника отдельно.", tag: null, span: 1 },
+  { icon: "audio", title: "Аудиомикшер с FX", desc: "Шумодав с пресетами и индикатором, 3-полосный EQ, компрессор, лимитер — на каждый источник.", tag: null, span: 1 },
   { icon: "p2p", title: "P2P со-стрим", desc: "Код комнаты — и друг на вашей сцене. WebRTC P2P с TURN fallback.", tag: "Уникальное", span: 1 },
   { icon: "record", title: "Запись в MP4", desc: "Локальная запись в высоком качестве. Стрим и запись одновременно.", tag: null, span: 1 },
   { icon: "wasapi", title: "Системный звук без кабелей", desc: "Нативный WASAPI захват — системный звук Windows без виртуальных кабелей. Один тоггл.", tag: "Только Windows", span: 2 },
   { icon: "security", title: "Шифрование ключей", desc: "Stream key зашифрован через Windows DPAPI. Данные никогда не покидают ваш ПК.", tag: null, span: 1 },
   { icon: "themes", title: "4 темы оформления", desc: "Тёмная, Светлая, Неон, Бумага — переключаются мгновенно.", tag: null, span: 1 },
-  { icon: "vcam", title: "Виртуальная камера", desc: "Сцена StreamBro как вебкамера — Zoom, Discord, Teams видят её как обычную камеру.", tag: "Новое в 1.3", span: 1 },
-  { icon: "ai", title: "AI шумоподавление", desc: "RNNoise — нейросеть убирает фон, вентилятор, клавиатуру. Один тоггл, без настроек.", tag: "Новое в 1.3", span: 1 },
+  { icon: "vcam", title: "Виртуальная камера", desc: "Сцена StreamBro как вебкамера — Zoom, Discord, Teams видят её как обычную камеру.", tag: "Новое", span: 1 },
+  { icon: "gate", title: "Продвинутый шумодав", desc: "4 пресета от лёгкого до заглушения + индикатор «открыт/закрыт» + измеритель уровня в реальном времени.", tag: "Новое", span: 1 },
 ];
 
 const ICONS: Record<string, React.ReactNode> = {
@@ -359,7 +356,7 @@ const ICONS: Record<string, React.ReactNode> = {
   security: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
   themes: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>,
   vcam: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 7 16 12 23 17V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/><circle cx="8" cy="12" r="2.5" fill="currentColor" opacity="0.3"/></svg>,
-  ai: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 0 2h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1 0-2h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>,
+  gate: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12h2l3-7 4 14 4-10 3 6h4"/></svg>,
 };
 
 function Features() {

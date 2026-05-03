@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { authMiddleware } = require("../middleware/auth");
 
-const CURRENT_VERSION = "1.3.0";
+const CURRENT_VERSION = "1.3.1";
 
 // ─── GET /api/download/latest ──────────────────────────────
 // Public — returns latest version info + download URL

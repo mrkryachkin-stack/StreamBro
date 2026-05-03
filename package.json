@@ -1,6 +1,6 @@
 {
   "name": "streambro",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "StreamBro — компактный профессиональный стриминг-композитор для Windows: сцены, источники, микшер, рамки, локальная запись и реальный RTMP на Twitch / YouTube / Kick / Custom. Оптимизация производительности, overlay canvas, FPS разделение в 1.2.",
   "main": "main.js",
   "scripts": {

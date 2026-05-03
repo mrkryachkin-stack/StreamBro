@@ -727,13 +727,13 @@ select option{
 .notif-pill:hover{background:var(--bg3,#2a2a48)!important}
 .notif-pill[data-state="1"]{
   border-color:#22c55e!important;
-  color:#86efac!important;
-  box-shadow:0 0 0 1px rgba(34,197,94,.15) inset,0 0 8px rgba(34,197,94,.18)!important;
+  color:var(--text)!important;
+  box-shadow:0 0 0 1px rgba(34,197,94,.15) inset!important;
 }
 .notif-pill[data-state="0"]{
   border-color:#ef4444!important;
-  color:#fca5a5!important;
-  box-shadow:0 0 0 1px rgba(239,68,68,.15) inset,0 0 8px rgba(239,68,68,.18)!important;
+  color:var(--text)!important;
+  box-shadow:0 0 0 1px rgba(239,68,68,.15) inset!important;
 }
 /* New message badge on friend card */
 .friend-new-msg{

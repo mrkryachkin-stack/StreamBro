@@ -6,6 +6,49 @@ const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 
+// Swagger (optional — only loaded if package is available)
+let swaggerUi = null;
+let swaggerSpec = null;
+try {
+  swaggerUi = require("swagger-ui-express");
+  const swaggerJsdoc = require("swagger-jsdoc");
+  swaggerSpec = swaggerJsdoc({
+    definition: {
+      openapi: "3.0.0",
+      info: {
+        title: "StreamBro API",
+        version: "1.3.0",
+        description: "REST API для StreamBro — платформы для стриминга/записи. Авторизация через JWT-куку (браузер) или Bearer-токен (десктоп).",
+        contact: { name: "StreamBro Support", url: "https://streambro.ru" },
+        license: { name: "GPL-3.0", url: "https://www.gnu.org/licenses/gpl-3.0.html" },
+      },
+      servers: [
+        { url: "https://streambro.ru", description: "Production" },
+        { url: "http://localhost:3001", description: "Local dev" },
+      ],
+      components: {
+        securitySchemes: {
+          cookieAuth: { type: "apiKey", in: "cookie", name: "token" },
+          bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+        },
+      },
+      security: [{ cookieAuth: [] }, { bearerAuth: [] }],
+      tags: [
+        { name: "Auth", description: "Аутентификация и регистрация" },
+        { name: "User", description: "Профиль пользователя" },
+        { name: "Friends", description: "Друзья и заявки" },
+        { name: "Chat", description: "Сообщения и чат" },
+        { name: "Rooms", description: "P2P комнаты со-стрима" },
+        { name: "Admin", description: "Административные функции" },
+        { name: "Health", description: "Статус сервера" },
+      ],
+    },
+    apis: ["./src/routes/*.js"],
+  });
+} catch (e) {
+  console.warn("[Swagger] swagger-ui-express not installed, skipping API docs");
+}
+
 const { PrismaClient } = require("@prisma/client");
 const { csrfMiddleware } = require("./middleware/auth");
 const prisma = new PrismaClient();
@@ -114,6 +157,16 @@ app.use("/api/rooms", apiLimiter, roomsRoutes);
 app.use("/api/stream-events", apiLimiter, streamEventRoutes);
 app.use("/api/settings", apiLimiter, settingsRoutes);
 app.use("/api/admin", adminRoutes);
+
+// ─── Swagger API Docs (public, no auth) ─────────────────────────
+if (swaggerUi && swaggerSpec) {
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+    customCss: ".swagger-ui .topbar { background: #08081a; } .swagger-ui .info .title { color: #8b5cf6; }",
+    customSiteTitle: "StreamBro API Docs",
+  }));
+  app.get("/api/docs.json", (req, res) => res.json(swaggerSpec));
+  console.log("[Swagger] API docs available at /api/docs");
+}
 
 // ─── Health check ──────────────────────────────────────────
 app.get("/api/health", (req, res) => {

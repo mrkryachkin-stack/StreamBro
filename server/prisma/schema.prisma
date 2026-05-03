@@ -282,3 +282,18 @@ model BugReport {
   @@index([appVersion])
   @@map("bug_reports")
 }
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  adminId    String
+  action     String
+  targetId   String?
+  targetType String?
+  details    String?  @db.Text
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([adminId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}

@@ -12,6 +12,26 @@ const serverApi = require('./modules/server-api');
 const cloudSync = require('./modules/cloud-sync');
 const virtualCamera = require('./modules/virtual-camera');
 
+// ─── Sentry error tracking (graceful — works without package) ───
+let _sentry = null;
+if (process.env.SENTRY_DSN) {
+  try {
+    _sentry = require('@sentry/electron/main');
+    _sentry.init({
+      dsn: process.env.SENTRY_DSN,
+      environment: app.isPackaged ? 'production' : 'development',
+      beforeSend(event) {
+        // Scrub stream key from breadcrumbs and messages
+        const str = JSON.stringify(event);
+        if (str.includes('rtmp') || str.includes('sk_')) return null;
+        return event;
+      },
+    });
+  } catch (e) {
+    _sentry = null;
+  }
+}
+
 const IS_PACKAGED = app.isPackaged;
 
 // ─── Deep-link protocol: streambro://login?token=... ───

@@ -1,4 +1,28 @@
 require("dotenv").config();
+
+// ─── Sentry (graceful — only if SENTRY_DSN is set and package installed) ───
+let Sentry = null;
+if (process.env.SENTRY_DSN) {
+  try {
+    Sentry = require("@sentry/node");
+    Sentry.init({
+      dsn: process.env.SENTRY_DSN,
+      environment: process.env.NODE_ENV || "production",
+      integrations: [Sentry.prismaIntegration()],
+      tracesSampleRate: 0.1,
+      beforeSend(event) {
+        // Scrub stream keys and passwords
+        const s = JSON.stringify(event);
+        if (s.includes("password") || s.includes("sk_")) return null;
+        return event;
+      },
+    });
+    console.log("[Sentry] Error tracking enabled");
+  } catch (e) {
+    Sentry = null;
+  }
+}
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -283,6 +307,17 @@ async function start() {
     process.exit(1);
   }
 }
+
+// Sentry error handler must be after all routes
+if (Sentry) {
+  app.use(Sentry.expressErrorHandler());
+}
+
+// Generic error handler
+app.use((err, req, res, _next) => {
+  console.error("[ERROR]", err.message);
+  res.status(500).json({ error: "Internal server error" });
+});
 
 start();
 

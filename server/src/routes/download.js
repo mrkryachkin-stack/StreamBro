@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { authMiddleware } = require("../middleware/auth");
 
-const CURRENT_VERSION = "1.2.3";
+const CURRENT_VERSION = "1.3.0";
 
 // ─── GET /api/download/latest ──────────────────────────────
 // Public — returns latest version info + download URL
@@ -10,7 +10,7 @@ router.get("/latest", (_req, res) => {
   res.json({
     version: CURRENT_VERSION,
     platform: "win-x64",
-    url: `/download/portable/StreamBro-${CURRENT_VERSION}-portable.zip`,
+    url: `/api/download/portable/StreamBro-${CURRENT_VERSION}-portable.zip`,
     filename: `StreamBro-${CURRENT_VERSION}-portable.zip`,
     releaseNotes: "https://streambro.ru/changelog",
     minWindowsVersion: "10",

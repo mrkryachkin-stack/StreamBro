@@ -420,7 +420,7 @@ router.get("/google/callback", async (req, res) => {
 });
 
 // ─── GET /api/auth/vk ─────────────────────────────────────
-// Initiate VK OAuth flow (VK ID API)
+// Initiate VK OAuth flow (VK ID API with PKCE)
 router.get("/vk", (req, res) => {
   const VK_CLIENT_ID = process.env.VK_CLIENT_ID;
   const VK_REDIRECT_URI = `${process.env.FRONTEND_URL || "https://streambro.ru"}/api/auth/vk/callback`;
@@ -429,22 +429,36 @@ router.get("/vk", (req, res) => {
     return res.status(500).json({ error: "VK OAuth не настроен" });
   }
 
+  // PKCE: generate code_verifier and code_challenge (S256)
+  const codeVerifier = crypto.randomBytes(32).toString("base64url"); // 43 chars
+  const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+
   const redirect = req.query.redirect || "web";
   const state = Buffer.from(JSON.stringify({ r: redirect, n: crypto.randomBytes(8).toString("hex") })).toString("base64url");
 
-  const url = `https://id.vk.com/authorize?` +
+  // Store code_verifier in a short-lived cookie for the callback
+  res.cookie("vk_code_verifier", codeVerifier, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    maxAge: 600000, // 10 min (code lifetime)
+  });
+
+  const url = `https://id.vk.ru/authorize?` +
     `response_type=code&` +
     `client_id=${VK_CLIENT_ID}&` +
     `redirect_uri=${encodeURIComponent(VK_REDIRECT_URI)}&` +
     `state=${state}&` +
-    `scope=email`;
+    `scope=email&` +
+    `code_challenge=${codeChallenge}&` +
+    `code_challenge_method=S256`;
 
   res.redirect(url);
 });
 
 // ─── GET /api/auth/vk/callback ──────────────────────────────
 router.get("/vk/callback", async (req, res) => {
-  const { code, error: oauthError } = req.query;
+  const { code, error: oauthError, state: returnedState, device_id } = req.query;
 
   if (oauthError) {
     return res.redirect(`/login?oauth_error=${encodeURIComponent(oauthError)}`);
@@ -454,33 +468,47 @@ router.get("/vk/callback", async (req, res) => {
   }
 
   const VK_CLIENT_ID = process.env.VK_CLIENT_ID;
-  const VK_CLIENT_SECRET = process.env.VK_CLIENT_SECRET;
   const VK_REDIRECT_URI = `${process.env.FRONTEND_URL || "https://streambro.ru"}/api/auth/vk/callback`;
+  const codeVerifier = req.cookies?.vk_code_verifier;
+
+  if (!codeVerifier) {
+    console.error("[AUTH] VK callback: missing code_verifier cookie");
+    return res.redirect("/login?oauth_error=pkce_missing");
+  }
+
+  // Clear the PKCE cookie
+  res.clearCookie("vk_code_verifier");
 
   try {
-    // Exchange code for tokens
-    const tokenRes = await fetch("https://id.vk.com/oauth2/token", {
+    // Exchange code for tokens (VK ID API with PKCE)
+    const tokenParams = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: VK_CLIENT_ID,
+      code_verifier: codeVerifier,
+      redirect_uri: VK_REDIRECT_URI,
+      state: returnedState || "",
+    });
+    if (device_id) tokenParams.set("device_id", device_id);
+
+    const tokenRes = await fetch("https://id.vk.ru/oauth2/auth", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: VK_CLIENT_ID,
-        client_secret: VK_CLIENT_SECRET,
-        redirect_uri: VK_REDIRECT_URI,
-        grant_type: "authorization_code",
-      }),
+      body: tokenParams,
     });
 
     if (!tokenRes.ok) {
-      console.error("[AUTH] VK token exchange failed:", await tokenRes.text());
+      const errText = await tokenRes.text();
+      console.error("[AUTH] VK token exchange failed:", tokenRes.status, errText);
       return res.redirect("/login?oauth_error=token_failed");
     }
 
     const tokens = await tokenRes.json();
     const accessToken = tokens.access_token;
+    const vkId = String(tokens.user_id);
 
     // Get user info from VK API
-    const userInfoRes = await fetch(`https://api.vk.com/method/users.get?access_token=${accessToken}&fields=photo_200,email&v=5.131`);
+    const userInfoRes = await fetch(`https://api.vk.com/method/users.get?access_token=${accessToken}&fields=photo_200&v=5.131`);
     const userInfo = await userInfoRes.json();
 
     if (userInfo.error) {
@@ -489,10 +517,10 @@ router.get("/vk/callback", async (req, res) => {
     }
 
     const vkUser = userInfo.response[0];
-    const vkId = String(vkUser.id);
     const name = `${vkUser.first_name} ${vkUser.last_name}`.trim();
     const avatar = vkUser.photo_200 || null;
-    const email = tokens.email || `vk${vkId}@streambro.oauth`; // VK may not always provide email
+    // Email comes from token response scope, not from users.get
+    const email = tokens.email || `vk${vkId}@streambro.oauth`;
 
     const result = await _findOrCreateOAuthUser(req, {
       provider: "vk",
@@ -510,7 +538,7 @@ router.get("/vk/callback", async (req, res) => {
     let redirectTo = "/dashboard";
     let isAppRedirect = false;
     try {
-      const stateObj = JSON.parse(Buffer.from(req.query.state, "base64url").toString());
+      const stateObj = JSON.parse(Buffer.from(returnedState || req.query.state || "", "base64url").toString());
       if (stateObj.r === "app") {
         isAppRedirect = true;
         redirectTo = `streambro://login?token=${encodeURIComponent(result.token)}&username=${encodeURIComponent(result.user.username)}&id=${result.user.id}&email=${encodeURIComponent(result.user.email || "")}`;

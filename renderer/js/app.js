@@ -1412,7 +1412,7 @@ function bind(){
   D.sourcesList.addEventListener('dragstart',e=>{dragSid=e.target.closest('.source-item')?.dataset.sid;if(dragSid)e.dataTransfer.effectAllowed='move';});
   D.sourcesList.addEventListener('dragover',e=>{e.preventDefault();e.dataTransfer.dropEffect='move';});
   D.sourcesList.addEventListener('drop',e=>{e.preventDefault();const target=e.target.closest('.source-item')?.dataset.sid;if(dragSid&&target&&dragSid!==target){const fi=S.srcs.findIndex(s=>s.id===dragSid),ti=S.srcs.findIndex(s=>s.id===target);const[src]=S.srcs.splice(fi,1);S.srcs.splice(ti,0,src);rebuildZ();renderSources();_coSafe(co=>co.broadcastSrcReorder(_currentSrcOrder()));}dragSid=null;});
-  D.joinRoomCode.oninput=e=>{let v=e.target.value.replace(/[^A-Za-z0-9]/g,'').toUpperCase();if(v.length>4)v=v.slice(0,4)+'-'+v.slice(4,8);e.target.value=v;};
+  D.joinRoomCode.oninput=e=>{let v=e.target.value.replace(/[^A-Za-z0-9]/g,'').toUpperCase();if(v.length>4)v=v.slice(0,4)+'-'+v.slice(4);if(v.length>9)v=v.slice(0,9)+'-'+v.slice(9);if(v.length>14)v=v.slice(0,14)+'-'+v.slice(14);if(v.length>19)v=v.slice(0,19);e.target.value=v;};
   document.querySelectorAll('.accordion-header').forEach(h=>h.onclick=()=>h.closest('.accordion-item').classList.toggle('open'));
   // Listen for system device changes — update visible source/mic lists if any modal is open
   if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener){

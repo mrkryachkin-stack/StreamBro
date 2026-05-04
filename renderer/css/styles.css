@@ -581,7 +581,7 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .tab-desc{font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.5}
 .room-code-display{text-align:center;margin-bottom:12px}
 .room-code-display label{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:6px}
-.room-code{font-size:28px;font-weight:800;letter-spacing:4px;color:var(--accent);font-variant-numeric:tabular-nums;padding:8px;background:rgba(0,0,0,.18);border-radius:var(--r);margin-bottom:6px}
+.room-code{font-size:18px;font-weight:800;letter-spacing:2px;color:var(--accent);font-variant-numeric:tabular-nums;padding:8px;background:rgba(0,0,0,.18);border-radius:var(--r);margin-bottom:6px;word-break:break-all}
 .room-code-input{font-size:18px!important;letter-spacing:2px;text-align:center;text-transform:uppercase}
 
 /* TURN relay section */

@@ -40,6 +40,7 @@ model User {
   friendRequests  Friendship[] @relation("FriendRequests")
   friendAddresses Friendship[] @relation("FriendAddresses")
   accounts        Account[]
+  aiConversations AiConversation[]
 
   @@map("users")
 }
@@ -283,17 +284,25 @@ model BugReport {
   @@map("bug_reports")
 }
 
-model AuditLog {
-  id         String   @id @default(uuid())
-  adminId    String
-  action     String
-  targetId   String?
-  targetType String?
-  details    String?  @db.Text
-  ip         String?
-  createdAt  DateTime @default(now())
+// ─── AI Bot Conversations (for support bot + training data) ──
 
-  @@index([adminId, createdAt])
-  @@index([action, createdAt])
-  @@map("audit_logs")
+model AiConversation {
+  id          String   @id @default(uuid())
+  userId      String
+  question    String   @db.Text
+  answer      String   @db.Text
+  provider    String   // "fireworks", "groq", "gemini", "ollama", "human"
+  model       String?  // "glm-5p1", "llama-3-70b", etc.
+  corrected   Boolean  @default(false)
+  correction  String?  @db.Text
+  rating      Int?
+  responseMs  Int?     // how long the AI took to respond
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([corrected, createdAt])
+  @@index([provider, createdAt])
+  @@map("ai_conversations")
 }

@@ -118,6 +118,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTurnCredentials: () => ipcRenderer.invoke('get-turn-credentials'),
   onPresenceUpdate:    (cb) => ipcRenderer.on('presence-update', (_, data) => cb(data)),
   onPresenceSignal:   (cb) => ipcRenderer.on('presence-signal', (_, data) => cb(data)),
+  onChatEdit:         (cb) => ipcRenderer.on('friends-chat-edit', (_, data) => cb(data)),
+  onChatDelete:       (cb) => ipcRenderer.on('friends-chat-delete', (_, data) => cb(data)),
 
   // ─── Bug reporter (1.1.0) ───
   bugReport:        (payload) => ipcRenderer.invoke('bug-report', payload),

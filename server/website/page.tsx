@@ -10,9 +10,11 @@ import Image from "next/image";
 const VERSION = "1.3.1";
 const CHANGES: Record<string, string[]> = {
   "1.3.1": [
-    "Стрим на Kick теперь работает стабильно — автофallback GPU → CPU энкодер",
-    "Продвинутый шумодав: 4 пресета + индикатор состояния + уровень сигнала",
-    "Стабильное подключение: автопереключение на программный кодек если GPU недоступен",
+    "AI-агент поддержки — умный помощник в чате, знает продукт и помогает 24/7",
+    "Мульти-API фолбэк: Fireworks → Groq → Gemini — всегда онлайн",
+    "Админ может редактировать и удалять сообщения в чате поддержки",
+    "Баг-репорты видны AI-боту — он объясняет причины ошибок",
+    "Сбор данных для обучения будущего локального AI-ассистента",
   ],
   "1.3.0": [
     "Виртуальная камера — сцена StreamBro как вебкамера в Zoom, Discord, Teams",
@@ -147,6 +149,7 @@ function ChangesModal({ open, onClose }: { open: boolean; onClose: () => void })
 function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
     const fn = () => setScrolled(window.scrollY > 40);
@@ -158,10 +161,12 @@ function Navbar() {
       .then((r) => r.json()).then((d) => setLoggedIn(!!d.hasCookie)).catch(() => {});
   }, []);
 
+  const navLinks = [["#features", "Функции"], ["#safety", "Безопасность"], ["#download", "Скачать"]];
+
   return (
     <nav style={{
       position: "fixed", top: 0, left: 0, right: 0, zIndex: 100,
-      padding: "0 2.5rem", height: 64,
+      padding: "0 1.5rem", height: 64,
       display: "flex", alignItems: "center", justifyContent: "space-between",
       background: scrolled ? "rgba(5,5,16,0.94)" : "transparent",
       backdropFilter: scrolled ? "blur(28px) saturate(1.5)" : "none",
@@ -173,8 +178,8 @@ function Navbar() {
         <span style={{ fontWeight: 800, fontSize: "1.05rem", letterSpacing: "-0.025em", color: "var(--text-0)" }}>StreamBro</span>
       </Link>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 36 }}>
-        {[["#features", "Функции"], ["#safety", "Безопасность"], ["#download", "Скачать"]].map(([href, label]) => (
+      <div className="nav-desktop" style={{ display: "flex", alignItems: "center", gap: 36 }}>
+        {navLinks.map(([href, label]) => (
           <a key={href} href={href} className="nav-link">{label}</a>
         ))}
 
@@ -191,6 +196,28 @@ function Navbar() {
           )}
         </div>
       </div>
+
+      {/* Hamburger for mobile */}
+      <button className="hamburger" onClick={() => setMobileOpen(!mobileOpen)} aria-label="Menu">
+        <span /><span /><span />
+      </button>
+
+      {/* Mobile menu overlay */}
+      {mobileOpen && (
+        <div className="nav-mobile-open" onClick={() => setMobileOpen(false)}>
+          {navLinks.map(([href, label]) => (
+            <a key={href} href={href}>{label}</a>
+          ))}
+          {loggedIn ? (
+            <Link href="/dashboard" onClick={() => setMobileOpen(false)}>Мой профиль</Link>
+          ) : (
+            <>
+              <Link href="/login" onClick={() => setMobileOpen(false)}>Войти</Link>
+              <Link href="/register" onClick={() => setMobileOpen(false)} className="btn-gold" style={{ padding: "0.7rem 2rem" }}>Начать бесплатно</Link>
+            </>
+          )}
+        </div>
+      )}
     </nav>
   );
 }
@@ -207,7 +234,7 @@ function Hero({ onChangelog, downloadUrl }: { onChangelog: () => void; downloadU
       display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center",
       textAlign: "center",
-      padding: "8rem 2rem 6rem",
+      padding: "6rem 1.5rem 4rem",
       overflow: "hidden",
     }}>
       {/* Layered background */}
@@ -305,7 +332,7 @@ function Hero({ onChangelog, downloadUrl }: { onChangelog: () => void; downloadU
         </div>
 
         {/* Stats row */}
-        <div style={{ marginTop: "5rem", display: "flex", justifyContent: "center", gap: "2rem", flexWrap: "wrap" }}>
+        <div className="hero-stats" style={{ marginTop: "5rem", display: "flex", justifyContent: "center", gap: "2rem", flexWrap: "wrap" }}>
           {[
             { val: "0 ₽", label: "Навсегда бесплатно", sub: "Без подписок и лимитов" },
             { val: "<30с", label: "От запуска до стрима", sub: "Без настроек" },
@@ -344,6 +371,7 @@ const FEATURES = [
   { icon: "themes", title: "4 темы оформления", desc: "Тёмная, Светлая, Неон, Бумага — переключаются мгновенно.", tag: null, span: 1 },
   { icon: "vcam", title: "Виртуальная камера", desc: "Сцена StreamBro как вебкамера — Zoom, Discord, Teams видят её как обычную камеру.", tag: "Новое", span: 1 },
   { icon: "gate", title: "Продвинутый шумодав", desc: "4 пресета от лёгкого до заглушения + индикатор «открыт/закрыт» + измеритель уровня в реальном времени.", tag: "Новое", span: 1 },
+  { icon: "ai", title: "AI-агент поддержки", desc: "Умный помощник в чате — знает StreamBro, объяснит настройки, поможет с ошибкой. Мульти-API фолбэк: всегда онлайн.", tag: "Новое", span: 2 },
 ];
 
 const ICONS: Record<string, React.ReactNode> = {
@@ -357,6 +385,7 @@ const ICONS: Record<string, React.ReactNode> = {
   themes: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>,
   vcam: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 7 16 12 23 17V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/><circle cx="8" cy="12" r="2.5" fill="currentColor" opacity="0.3"/></svg>,
   gate: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12h2l3-7 4 14 4-10 3 6h4"/></svg>,
+  ai: <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 1 4 4v1a1 1 0 0 0 1 1h1a4 4 0 0 1 0 8h-1a1 1 0 0 0-1 1v1a4 4 0 0 1-8 0v-1a1 1 0 0 0-1-1H6a4 4 0 0 1 0-8h1a1 1 0 0 0 1-1V6a4 4 0 0 1 4-4z"/><circle cx="9" cy="10" r="1" fill="currentColor"/><circle cx="15" cy="10" r="1" fill="currentColor"/><path d="M9 15s1.5 1.5 3 1.5 3-1.5 3-1.5"/></svg>,
 };
 
 function Features() {
@@ -421,7 +450,7 @@ function HowItWorks() {
         </div>
 
         {/* Steps — horizontal large cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "1px", background: "var(--border)", borderRadius: "var(--r-xl)", overflow: "hidden" }}>
+        <div className="steps-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "1px", background: "var(--border)", borderRadius: "var(--r-xl)", overflow: "hidden" }}>
           {STEPS.map((s, i) => (
             <div
               key={s.num}
@@ -461,7 +490,7 @@ function SafetySection() {
   return (
     <section id="safety" style={{ padding: "8rem 0" }}>
       <div className="container">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3.5rem", alignItems: "start" }}>
+        <div className="safety-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3.5rem", alignItems: "start" }}>
           {/* Left */}
           <div className="reveal">
             <span className="label-overline">Безопасность</span>
@@ -538,7 +567,7 @@ function DownloadSection({ downloadUrl }: { downloadUrl: string }) {
           {/* Inner glow */}
           <div style={{ position: "absolute", top: "-30%", left: "50%", transform: "translateX(-50%)", width: 700, height: 500, background: "radial-gradient(ellipse, rgba(201,162,39,0.07) 0%, transparent 65%)", pointerEvents: "none" }} />
 
-          <div style={{ position: "relative", padding: "6rem 3rem", textAlign: "center" }}>
+          <div className="download-inner" style={{ position: "relative", padding: "6rem 3rem", textAlign: "center" }}>
             {/* Free stamp */}
             <div style={{
               display: "inline-flex", alignItems: "center", gap: "0.5rem",
@@ -573,7 +602,7 @@ function DownloadSection({ downloadUrl }: { downloadUrl: string }) {
               </Link>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "center", gap: "2.5rem", flexWrap: "wrap" }}>
+            <div className="download-features" style={{ display: "flex", justifyContent: "center", gap: "2.5rem", flexWrap: "wrap" }}>
               {[
                 { icon: "📦", text: "Без установки — распакуй и запускай" },
                 { icon: "🔄", text: "Автообновление внутри приложения" },
@@ -598,7 +627,7 @@ function CtaBanner({ downloadUrl }: { downloadUrl: string }) {
   return (
     <section style={{ padding: "6rem 0" }}>
       <div className="container">
-        <div className="reveal" style={{
+        <div className="reveal cta-inner" style={{
           position: "relative", padding: "5rem 3rem", borderRadius: "var(--r-xl)",
           background: "linear-gradient(135deg, rgba(201,162,39,0.06) 0%, rgba(124,92,191,0.04) 50%, var(--bg-1) 100%)",
           border: "1px solid var(--border-gold)", textAlign: "center", overflow: "hidden",
@@ -629,7 +658,7 @@ function Footer() {
   return (
     <footer style={{ borderTop: "1px solid var(--border)", padding: "3rem 0 2rem" }}>
       <div className="container">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", flexWrap: "wrap", gap: "2rem", marginBottom: "2rem" }}>
+        <div className="footer-grid" style={{ display: "flex", justifyContent: "space-between", alignItems: "start", flexWrap: "wrap", gap: "2rem", marginBottom: "2rem" }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: "0.75rem" }}>
               <Image src="/logo.png" alt="StreamBro" width={24} height={24} style={{ borderRadius: 6 }} />

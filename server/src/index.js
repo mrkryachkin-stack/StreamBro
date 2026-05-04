@@ -93,6 +93,7 @@ const settingsRoutes = require("./routes/settings");
 const adminRoutes = require("./routes/admin");
 
 const PresenceServer = require("./presence");
+const aiBot = require("./ai-bot");
 
 const app = express();
 const server = http.createServer(app);
@@ -107,6 +108,9 @@ app.set("presenceServer", presence);
 friendsRoutes.setPresence(presence);
 adminRoutes.setPresence(presence);
 chatRoutes.setPresence(presence);
+
+// Initialize AI bot (needs prisma + presence for responding + push)
+aiBot.init(prisma, presence);
 
 app.set("trust proxy", 1);
 
@@ -293,11 +297,22 @@ async function _ensureSupportUser() {
   }
 }
 
+// After support user is ensured, set its ID in the AI bot
+async function _initAiBot() {
+  try {
+    const supportUser = await prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (supportUser) aiBot.setSupportUserId(supportUser.id);
+  } catch (err) {
+    console.error("[AI-BOT] Failed to set support user ID:", err.message);
+  }
+}
+
 async function start() {
   try {
     await prisma.$connect();
     console.log("[DB] PostgreSQL connected");
     await _ensureSupportUser();
+    await _initAiBot();
     server.listen(PORT, () => {
       console.log(`[API] StreamBro server running on :${PORT}`);
       console.log(`[PRESENCE] WebSocket on /presence`);

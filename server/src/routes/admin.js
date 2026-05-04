@@ -4,6 +4,7 @@ let speakeasy = null;
 let qrcode = null;
 try { speakeasy = require("speakeasy"); qrcode = require("qrcode"); } catch(e) { console.warn("[2FA] speakeasy/qrcode not installed, 2FA disabled"); }
 const { authMiddleware, adminMiddleware } = require("../middleware/auth");
+const aiBot = require("../ai-bot");
 
 // ─── POST /api/admin/setup ────────────────────────────────
 // One-time setup: create admin user. Requires ADMIN_SECRET.
@@ -89,6 +90,37 @@ router.get("/audit", async (req, res) => {
     res.json(logs);
   } catch (err) {
     console.error('[ADMIN] Audit log error:', err);
+    res.status(500).json({ error: 'Ошибка' });
+  }
+});
+
+// ─── GET /api/admin/streams ──────────────────────────────
+// Stream history with user info, filters, and aggregation
+router.get("/streams", async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+    const platform = req.query.platform || null;
+    const activeOnly = req.query.active === 'true';
+
+    const where = {};
+    if (platform) where.platform = platform;
+    if (activeOnly) where.endedAt = null;
+
+    const [streams, total, byPlatform, avgDuration] = await Promise.all([
+      req.prisma.streamEvent.findMany({
+        where,
+        orderBy: { startedAt: 'desc' },
+        take: limit,
+        include: { user: { select: { username: true, displayName: true, avatarUrl: true } } },
+      }),
+      req.prisma.streamEvent.count({ where }),
+      req.prisma.streamEvent.groupBy({ by: ['platform'], _count: { id: true }, orderBy: { _count: { id: 'desc' } } }),
+      req.prisma.streamEvent.aggregate({ _avg: { duration: true }, _max: { duration: true } }),
+    ]);
+
+    res.json({ streams, total, byPlatform, avgDuration: avgDuration._avg.duration, maxDuration: avgDuration._max.duration });
+  } catch (err) {
+    console.error('[ADMIN] Streams error:', err);
     res.status(500).json({ error: 'Ошибка' });
   }
 });
@@ -381,6 +413,20 @@ router.get("/feedback", authMiddleware, adminMiddleware, async (req, res) => {
     });
 
     // Group by conversation partner
+    // Also cross-reference with AiConversation to tag AI responses
+    const aiConvos = await req.prisma.aiConversation.findMany({
+      select: { question: true, answer: true, provider: true, corrected: true, correction: true, userId: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
+
+    // Build a set of AI answer texts for matching (by content similarity)
+    const aiAnswersByUser = new Map();
+    for (const ac of aiConvos) {
+      if (!aiAnswersByUser.has(ac.userId)) aiAnswersByUser.set(ac.userId, []);
+      aiAnswersByUser.get(ac.userId).push(ac);
+    }
+
     const convMap = new Map();
     for (const msg of messages) {
       const partnerId = msg.senderId === supportUser.id ? msg.receiverId : msg.senderId;
@@ -388,6 +434,27 @@ router.get("/feedback", authMiddleware, adminMiddleware, async (req, res) => {
       if (!convMap.has(partnerId)) {
         convMap.set(partnerId, { partner, messages: [] });
       }
+
+      // Check if this message from support is an AI response
+      let isAi = false;
+      let aiProvider = null;
+      let aiCorrected = false;
+      let aiCorrection = null;
+      if (msg.senderId === supportUser.id) {
+        const userAiConvos = aiAnswersByUser.get(partnerId) || [];
+        // Match by answer content and approximate timestamp
+        const match = userAiConvos.find(ac =>
+          ac.answer === msg.content ||
+          (ac.answer && msg.content && ac.answer.length > 20 && msg.content.includes(ac.answer.slice(0, 50)))
+        );
+        if (match) {
+          isAi = true;
+          aiProvider = match.provider;
+          aiCorrected = match.corrected;
+          aiCorrection = match.correction;
+        }
+      }
+
       convMap.get(partnerId).messages.push({
         id: msg.id,
         content: msg.content,
@@ -395,6 +462,10 @@ router.get("/feedback", authMiddleware, adminMiddleware, async (req, res) => {
         edited: msg.edited,
         read: msg.read,
         createdAt: msg.createdAt,
+        isAi,
+        aiProvider,
+        aiCorrected,
+        aiCorrection,
       });
     }
 
@@ -416,6 +487,7 @@ router.get("/feedback", authMiddleware, adminMiddleware, async (req, res) => {
       ...c,
       lastMessage: c.messages[0],
       unread: unreadBySender[c.partner.id] || 0,
+      aiPaused: aiBot.isPaused(c.partner.id),
     }));
 
     res.json({ conversations });
@@ -479,6 +551,80 @@ router.post("/feedback/reply", authMiddleware, adminMiddleware, async (req, res)
   } catch (err) {
     console.error("[ADMIN] Feedback reply error:", err);
     res.status(500).json({ error: "Ошибка отправки ответа" });
+  }
+});
+
+// ─── PATCH /api/admin/feedback/message/:messageId ──────────
+// Admin edits a message (own or user's) — user sees the update via Presence WS
+router.patch("/feedback/message/:messageId", authMiddleware, adminMiddleware, async (req, res) => {
+  const { messageId } = req.params;
+  const { content } = req.body;
+  if (!content || !content.trim()) return res.status(400).json({ error: "Пустое сообщение" });
+  if (content.length > 2000) return res.status(400).json({ error: "Слишком длинное сообщение" });
+
+  try {
+    const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (!supportUser) return res.status(404).json({ error: "Support user not found" });
+
+    const message = await req.prisma.message.findUnique({ where: { id: messageId } });
+    if (!message) return res.status(404).json({ error: "Сообщение не найдено" });
+
+    // Admin can edit messages in support conversations
+    const isSupportConv = message.senderId === supportUser.id || message.receiverId === supportUser.id;
+    if (!isSupportConv) return res.status(403).json({ error: "Можно редактировать только сообщения в чате поддержки" });
+
+    const updated = await req.prisma.message.update({
+      where: { id: messageId },
+      data: { content: content.trim(), edited: true },
+    });
+
+    // Notify the other party via Presence WS
+    const notifyUserId = message.senderId === supportUser.id ? message.receiverId : message.senderId;
+    if (_presence) {
+      _presence.notifyUser(notifyUserId, {
+        type: "chat-edit",
+        messageId: message.id,
+        content: content.trim(),
+        edited: true,
+      });
+    }
+
+    res.json({ ok: true, message: updated });
+  } catch (err) {
+    console.error("[ADMIN] Edit message error:", err);
+    res.status(500).json({ error: "Ошибка редактирования" });
+  }
+});
+
+// ─── DELETE /api/admin/feedback/message/:messageId ──────────
+// Admin deletes a message (own or user's) — user sees removal via Presence WS
+router.delete("/feedback/message/:messageId", authMiddleware, adminMiddleware, async (req, res) => {
+  const { messageId } = req.params;
+
+  try {
+    const supportUser = await req.prisma.user.findFirst({ where: { username: "StreamBro" } });
+    if (!supportUser) return res.status(404).json({ error: "Support user not found" });
+
+    const message = await req.prisma.message.findUnique({ where: { id: messageId } });
+    if (!message) return res.status(404).json({ error: "Сообщение не найдено" });
+
+    const isSupportConv = message.senderId === supportUser.id || message.receiverId === supportUser.id;
+    if (!isSupportConv) return res.status(403).json({ error: "Можно удалять только сообщения в чате поддержки" });
+
+    // Notify the other party BEFORE deleting
+    const notifyUserId = message.senderId === supportUser.id ? message.receiverId : message.senderId;
+    if (_presence) {
+      _presence.notifyUser(notifyUserId, {
+        type: "chat-delete",
+        messageId: message.id,
+      });
+    }
+
+    await req.prisma.message.delete({ where: { id: messageId } });
+    res.json({ ok: true, deleted: messageId });
+  } catch (err) {
+    console.error("[ADMIN] Delete message error:", err);
+    res.status(500).json({ error: "Ошибка удаления" });
   }
 });
 
@@ -582,6 +728,136 @@ router.get("/2fa/status", authMiddleware, adminMiddleware, async (req, res) => {
     const user = await req.prisma.user.findUnique({ where: { id: req.user.id } });
     res.json({ enabled: user?.totpEnabled || false });
   } catch (err) {
+    res.status(500).json({ error: "Ошибка" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// ─── AI Bot Management ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+
+// ─── GET /api/admin/ai/stats ─────────────────────────────
+// Get AI bot statistics
+router.get("/ai/stats", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const stats = await aiBot.getStats();
+    res.json(stats);
+  } catch (err) {
+    console.error("[AI-ADMIN] Stats error:", err);
+    res.status(500).json({ error: "Ошибка получения статистики" });
+  }
+});
+
+// ─── POST /api/admin/ai/toggle ──────────────────────────
+// Enable or disable the AI bot
+router.post("/ai/toggle", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    if (typeof enabled !== "boolean") return res.status(400).json({ error: "Укажите enabled: true/false" });
+
+    aiBot.setEnabled(enabled);
+    res.json({ ok: true, enabled: aiBot.isEnabled() });
+  } catch (err) {
+    console.error("[AI-ADMIN] Toggle error:", err);
+    res.status(500).json({ error: "Ошибка" });
+  }
+});
+
+// ─── GET /api/admin/ai/conversations ─────────────────────
+// List AI conversations (with optional filters)
+router.get("/ai/conversations", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const corrected = req.query.corrected !== undefined ? req.query.corrected === "true" : undefined;
+    const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
+    const offset = parseInt(req.query.offset || "0", 10);
+
+    const result = await aiBot.getConversations({ corrected, limit, offset });
+    res.json(result);
+  } catch (err) {
+    console.error("[AI-ADMIN] Conversations error:", err);
+    res.status(500).json({ error: "Ошибка получения диалогов" });
+  }
+});
+
+// ─── POST /api/admin/ai/correct ─────────────────────────
+// Correct an AI response (for training data quality)
+router.post("/ai/correct", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { conversationId, correction, rating } = req.body;
+    if (!conversationId || !correction) {
+      return res.status(400).json({ error: "Укажите conversationId и correction" });
+    }
+    if (rating !== undefined && (rating < 1 || rating > 5)) {
+      return res.status(400).json({ error: "Rating от 1 до 5" });
+    }
+
+    const result = await aiBot.correctConversation(conversationId, correction, rating);
+    if (!result.ok) return res.status(404).json({ error: result.error });
+    res.json(result);
+  } catch (err) {
+    console.error("[AI-ADMIN] Correct error:", err);
+    res.status(500).json({ error: "Ошибка исправления" });
+  }
+});
+
+// ─── GET /api/admin/ai/export ────────────────────────────
+// Export training data in OpenAI fine-tune JSONL format
+router.get("/ai/export", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const onlyCorrected = req.query.only_corrected !== "false";  // default: only corrected
+    const minRating = parseInt(req.query.min_rating || "4", 10);
+
+    const data = await aiBot.exportTrainingData({ onlyCorrected, minRating });
+    if (!data) return res.status(500).json({ error: "Ошибка экспорта" });
+
+    res.setHeader("Content-Type", "application/jsonl");
+    res.setHeader("Content-Disposition", "attachment; filename=streambro-training-data.jsonl");
+    res.send(data);
+  } catch (err) {
+    console.error("[AI-ADMIN] Export error:", err);
+    res.status(500).json({ error: "Ошибка экспорта" });
+  }
+});
+
+// ─── POST /api/admin/ai/pause/:userId ────────────────────
+// Pause AI for a specific user's chat (admin wants to talk manually)
+router.post("/ai/pause/:userId", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ error: "Укажите userId" });
+
+    aiBot.pauseForUser(userId);
+    res.json({ ok: true, state: aiBot.getPauseState(userId) });
+  } catch (err) {
+    console.error("[AI-ADMIN] Pause error:", err);
+    res.status(500).json({ error: "Ошибка паузы" });
+  }
+});
+
+// ─── POST /api/admin/ai/resume/:userId ────────────────────
+// Resume AI for a specific user's chat.
+// AI will NOT read old messages — it only responds to NEW ones after resume.
+router.post("/ai/resume/:userId", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ error: "Укажите userId" });
+
+    aiBot.resumeForUser(userId);
+    res.json({ ok: true, state: aiBot.getPauseState(userId) });
+  } catch (err) {
+    console.error("[AI-ADMIN] Resume error:", err);
+    res.status(500).json({ error: "Ошибка возобновления" });
+  }
+});
+
+// ─── GET /api/admin/ai/pause-state/:userId ────────────────
+// Get AI pause state for a specific user
+router.get("/ai/pause-state/:userId", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    res.json(aiBot.getPauseState(userId));
+  } catch (err) {
+    console.error("[AI-ADMIN] Pause state error:", err);
     res.status(500).json({ error: "Ошибка" });
   }
 });

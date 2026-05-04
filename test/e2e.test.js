@@ -183,6 +183,104 @@ console.log('\n## E2E Smoke Tests\n');
   ok('Injection attempt falls back', safeEncoder('libx264; rm -rf /') === 'libx264');
 }
 
+// ─── 11. Room code generation & formatter ──────────────────────────────
+{
+  // Same generateRoomCode as in signaling-server/server.js and server/src/routes/rooms.js
+  function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 4; i++) {
+      if (i > 0) code += '-';
+      for (let j = 0; j < 4; j++) {
+        code += chars[Math.floor(Math.random() * chars.length)];
+      }
+    }
+    return code;
+  }
+
+  // Same formatter as in renderer/js/app.js (oninput handler)
+  function formatRoomCode(raw) {
+    let v = raw.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    if (v.length > 4) v = v.slice(0, 4) + '-' + v.slice(4);
+    if (v.length > 9) v = v.slice(0, 9) + '-' + v.slice(9);
+    if (v.length > 14) v = v.slice(0, 14) + '-' + v.slice(14);
+    if (v.length > 19) v = v.slice(0, 19);
+    return v;
+  }
+
+  // Test code generation
+  const codes = [];
+  for (let i = 0; i < 50; i++) codes.push(generateRoomCode());
+
+  ok('Room code format XXXX-XXXX-XXXX-XXXX', codes.every(c => /^\w{4}-\w{4}-\w{4}-\w{4}$/.test(c)));
+  ok('Room code 19 chars (16 alphanum + 3 dashes)', codes.every(c => c.length === 19));
+  ok('Room code no ambiguous chars (0/O/1/I)', codes.every(c => !/[0OI1]/.test(c)));
+  ok('Room codes are unique (50 generated)', new Set(codes).size === 50);
+
+  // Test formatter: user types characters one by one
+  ok('Format: empty → empty', formatRoomCode('') === '');
+  ok('Format: "AB" → "AB"', formatRoomCode('AB') === 'AB');
+  ok('Format: "ABCD" → "ABCD"', formatRoomCode('ABCD') === 'ABCD');
+  ok('Format: "ABCDE" → "ABCD-E"', formatRoomCode('ABCDE') === 'ABCD-E');
+  ok('Format: "ABCD1234" → "ABCD-1234"', formatRoomCode('ABCD1234') === 'ABCD-1234');
+  ok('Format: "ABCD12345" → "ABCD-1234-5"', formatRoomCode('ABCD12345') === 'ABCD-1234-5');
+  ok('Format: "ABCD1234EFGH" → "ABCD-1234-EFGH"', formatRoomCode('ABCD1234EFGH') === 'ABCD-1234-EFGH');
+  ok('Format: full 16 chars → XXXX-XXXX-XXXX-XXXX', formatRoomCode('ABCD1234EFGH5678') === 'ABCD-1234-EFGH-5678');
+  ok('Format: 17+ chars → truncated to 19', formatRoomCode('ABCD1234EFGH5678ZZ') === 'ABCD-1234-EFGH-5678');
+
+  // Test formatter: user pastes with dashes
+  ok('Format: paste with dashes works', formatRoomCode('ABCD-1234-EFGH-5678') === 'ABCD-1234-EFGH-5678');
+  ok('Format: paste lowercase auto-uppercases', formatRoomCode('abcd-1234-efgh-5678') === 'ABCD-1234-EFGH-5678');
+
+  // Critical test: generated code passes through formatter unchanged
+  const testCode = generateRoomCode();
+  ok('Generated code passes formatter unchanged', formatRoomCode(testCode) === testCode);
+
+  // Simulate join flow: user types code char by char → final value matches generated code
+  let typed = '';
+  for (const ch of testCode) {
+    typed = formatRoomCode(typed + ch);
+  }
+  ok('Typing generated code char-by-char matches', typed === testCode);
+}
+
+// ─── 12. Room code signaling join validation ──────────────────────────
+{
+  // Simulate the signaling server join flow
+  const rooms = new Map();
+
+  function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 4; i++) {
+      if (i > 0) code += '-';
+      for (let j = 0; j < 4; j++) {
+        code += chars[Math.floor(Math.random() * chars.length)];
+      }
+    }
+    return code;
+  }
+
+  // Create room
+  const code = generateRoomCode();
+  rooms.set(code, { code, peers: new Map() });
+
+  // Join with exact code
+  const joinCode = code.toUpperCase();
+  ok('Join with exact code finds room', rooms.has(joinCode));
+
+  // Join with lowercase
+  const lowerCode = code.toLowerCase();
+  ok('Join with lowercase finds room (server .toUpperCase)', rooms.has(lowerCode.toUpperCase()));
+
+  // Join with wrong code
+  ok('Join with wrong code not found', !rooms.has('ZZZZ-ZZZZ-ZZZZ-ZZZZ'));
+
+  // Join with truncated code (8 chars, the old bug)
+  const truncated = code.slice(0, 9); // e.g. "ABCD-1234"
+  ok('Join with truncated code NOT found (old bug scenario)', !rooms.has(truncated));
+}
+
 // ─── Summary ───────────────────────────────────────────────────────────
 console.log(`\n## e2e smoke: ${passed} passed, ${failed} failed`);
 if (failed > 0) { console.error('SOME TESTS FAILED'); process.exit(1); }

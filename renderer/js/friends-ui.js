@@ -718,6 +718,56 @@
         }
       });
     }
+
+    // Admin edit/delete message via Presence WS — update chat in real-time
+    if (window.electronAPI && window.electronAPI.onChatEdit) {
+      window.electronAPI.onChatEdit((data) => {
+        if (!data || !data.messageId) return;
+        // Update cache
+        for (const fid of Object.keys(_chatMessages)) {
+          const idx = _chatMessages[fid].findIndex(m => m.id === data.messageId || m.messageId === data.messageId);
+          if (idx !== -1) {
+            _chatMessages[fid][idx].text = data.content;
+            _chatMessages[fid][idx].content = data.content;
+            _chatMessages[fid][idx].edited = true;
+            break;
+          }
+        }
+        // Update DOM if chat is open
+        if (_expanded) {
+          const el = document.querySelector(`[data-msg-id="${data.messageId}"]`);
+          if (el) {
+            const textEl = el.querySelector('.msg-text') || el;
+            if (textEl && textEl.textContent !== undefined) {
+              textEl.textContent = data.content;
+            }
+            // Add edited indicator if not present
+            if (!el.querySelector('.msg-edited')) {
+              const span = document.createElement('span');
+              span.className = 'msg-edited';
+              span.style.cssText = 'margin-left:6px;font-size:0.65rem;color:var(--muted,#64748b);font-style:italic';
+              span.textContent = '(ред.)';
+              el.appendChild(span);
+            }
+          }
+        }
+      });
+    }
+
+    if (window.electronAPI && window.electronAPI.onChatDelete) {
+      window.electronAPI.onChatDelete((data) => {
+        if (!data || !data.messageId) return;
+        // Remove from cache
+        for (const fid of Object.keys(_chatMessages)) {
+          _chatMessages[fid] = _chatMessages[fid].filter(m => m.id !== data.messageId && m.messageId !== data.messageId);
+        }
+        // Remove from DOM if chat is open
+        if (_expanded) {
+          const el = document.querySelector(`[data-msg-id="${data.messageId}"]`);
+          if (el) el.remove();
+        }
+      });
+    }
   }
 
   function reset() {

@@ -253,6 +253,20 @@ function presenceConnect() {
         });
         break;
 
+      case 'chat-edit':
+        win.webContents.send('friends-chat-edit', {
+          messageId: msg.messageId,
+          content: msg.content,
+          edited: true,
+        });
+        break;
+
+      case 'chat-delete':
+        win.webContents.send('friends-chat-delete', {
+          messageId: msg.messageId,
+        });
+        break;
+
       case 'presence':
         win.webContents.send('presence-update', {
           userId: msg.userId,

@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { authMiddleware } = require("../middleware/auth");
+const aiBot = require("../ai-bot");
 
 // Presence server reference — set from index.js
 let _presence = null;
@@ -84,6 +85,15 @@ router.post("/:userId", authMiddleware, async (req, res) => {
         content: content.trim(),
         messageId: message.id,
         timestamp: Date.now(),
+      });
+    }
+
+    // ─── AI Bot hook: if receiver is the support user, trigger AI response ───
+    const supportId = aiBot.getSupportUserId();
+    if (supportId && receiverId === supportId && aiBot.shouldRespond(req.user.id)) {
+      // Fire and forget — don't block the HTTP response
+      aiBot.respond(req.user.id, content.trim(), message.id).catch(err => {
+        console.error("[CHAT] AI bot error:", err.message);
       });
     }
 

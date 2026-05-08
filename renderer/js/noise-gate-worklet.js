@@ -20,6 +20,9 @@ class NoisGateProcessor extends AudioWorkletProcessor {
     this._holdSamples = 0;
     // Pre-allocated gain envelope buffer — avoids ~370 allocations/sec inside process()
     this._gainEnv = new Float32Array(128);
+    // Throttled state reporting (~80ms interval)
+    this._lastStateMs = 0;
+    this._stateInterval = 80;
 
     // Receive settings updates from main thread
     this.port.onmessage = ({ data }) => {
@@ -102,6 +105,13 @@ class NoisGateProcessor extends AudioWorkletProcessor {
       const inp = input[Math.min(ch, lastInIdx)] || new Float32Array(frameLen);
       const out = output[ch];
       for (let i = 0; i < frameLen; i++) out[i] = inp[i] * gainEnv[i];
+    }
+
+    // Throttled state reporting to main thread (for UI indicators)
+    const now = currentFrame * 128 / sampleRate * 1000;
+    if (now - this._lastStateMs >= this._stateInterval) {
+      this._lastStateMs = now;
+      this.port.postMessage({ type: 'gate-state', open: this._gateOpen, rmsDb: rmsDb });
     }
 
     return true; // keep processor alive

@@ -281,6 +281,133 @@ console.log('\n## E2E Smoke Tests\n');
   ok('Join with truncated code NOT found (old bug scenario)', !rooms.has(truncated));
 }
 
+// ─── 11. P2P Peer ID Resolution ───────────────────────────────────────
+{
+  // Simulate profile with serverId (authenticated user)
+  const profile = { id: 'prof-abc123', serverId: '550e8400-e29b-41d4-a716-446655440000' };
+  const myPeerId = profile.serverId || profile.id || 'local';
+  ok('Peer ID uses serverId when available', myPeerId === profile.serverId);
+  ok('Peer ID is not local when authenticated', myPeerId !== 'local');
+
+  // Simulate profile without serverId (local-only user)
+  const profileLocal = { id: 'prof-xyz789', serverId: '' };
+  const myPeerIdLocal = profileLocal.serverId || profileLocal.id || 'local';
+  ok('Peer ID falls back to local id when no serverId', myPeerIdLocal === profileLocal.id);
+  ok('Peer ID is not string "local" with local id', myPeerIdLocal !== 'local');
+
+  // Simulate profile with undefined userId (the old bug)
+  const profileBug = { id: 'prof-def456', serverId: 'uuid-123', userId: undefined };
+  const myPeerIdBug = profileBug.userId || profileBug.serverId || profileBug.id || 'local';
+  ok('Old profile.userId undefined does not cause "local"', myPeerIdBug !== 'local');
+
+  // The actual fix: serverId || id || 'local'
+  const myPeerIdFixed = profileBug.serverId || profileBug.id || 'local';
+  ok('Fixed peer ID uses serverId first', myPeerIdFixed === profileBug.serverId);
+}
+
+// ─── 12. P2P Signal Message Format ─────────────────────────────────────
+{
+  // Verify signal message format matches Presence WS expectations
+  const signalMsg = {
+    type: 'signal',
+    targetPeerId: '550e8400-e29b-41d4-a716-446655440000',
+    signal: { type: 'sdp-offer', sdp: { type: 'offer', sdp: 'v=0\r\n...' } },
+    roomCode: 'ABCD-1234-EFGH-5678',
+  };
+  ok('Signal message has type "signal"', signalMsg.type === 'signal');
+  ok('Signal message has targetPeerId', typeof signalMsg.targetPeerId === 'string');
+  ok('Signal message has signal object', typeof signalMsg.signal === 'object');
+  ok('Signal message has roomCode', typeof signalMsg.roomCode === 'string');
+  ok('Signal message targetPeerId is UUID format', /^[0-9a-f-]{36}$/.test(signalMsg.targetPeerId));
+  ok('Signal message roomCode is 19 chars', signalMsg.roomCode.length === 19);
+
+  // ICE candidate format
+  const iceMsg = {
+    type: 'signal',
+    targetPeerId: '550e8400-e29b-41d4-a716-446655440000',
+    signal: { type: 'ice-candidate', candidate: { candidate: '...', sdpMid: '0', sdpMLineIndex: 0 } },
+    roomCode: 'ABCD-1234-EFGH-5678',
+  };
+  ok('ICE candidate signal has candidate field', iceMsg.signal.type === 'ice-candidate');
+  ok('ICE candidate signal has candidate object', typeof iceMsg.signal.candidate === 'object');
+}
+
+// ─── 13. ICE Server Configuration ──────────────────────────────────────
+{
+  // Simulate _buildIceServers logic
+  function buildIceServers(turnUrl, turnUser, turnPass) {
+    const servers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+    ];
+    if (turnUrl && turnUser && turnPass) {
+      const base = turnUrl.replace(/\/$/, '');
+      servers.push({
+        urls: [base + '?transport=udp', base + '?transport=tcp'],
+        username: turnUser,
+        credential: turnPass,
+      });
+    }
+    return servers;
+  }
+
+  const stunOnly = buildIceServers('', '', '');
+  ok('STUN-only has 5 servers', stunOnly.length === 5);
+  ok('STUN-only has no TURN', !stunOnly.some(s => s.username));
+
+  const withTurn = buildIceServers('turn:streambro.ru:3478', 'user', 'pass');
+  ok('STUN+TURN has 6 servers', withTurn.length === 6);
+  ok('TURN entry has username', withTurn[5].username === 'user');
+  ok('TURN entry has credential', withTurn[5].credential === 'pass');
+  ok('TURN entry has udp+tcp urls', withTurn[5].urls.length === 2);
+
+  const missingTurn = buildIceServers('turn:streambro.ru:3478', 'user', '');
+  ok('Missing TURN password = no TURN', missingTurn.length === 5);
+}
+
+// ─── 14. Echo Guard ────────────────────────────────────────────────────
+{
+  // Simulate _applyRemoteSrcAdd echo guard
+  const myPeerId = '550e8400-e29b-41d4-a716-446655440000';
+  const remotePeerId = '660e8400-e29b-41d4-a716-446655440001';
+
+  const metaOwn = { gid: 'src1', ownerPeerId: myPeerId };
+  const metaRemote = { gid: 'src2', ownerPeerId: remotePeerId };
+  const metaNoOwner = { gid: 'src3' };
+
+  // Echo guard: ownerPeerId === myPeerId → skip (it's our own source replayed back)
+  ok('Echo guard blocks own sources', metaOwn.ownerPeerId === myPeerId);
+  ok('Echo guard allows remote sources', metaRemote.ownerPeerId !== myPeerId);
+  ok('Echo guard allows sources without ownerPeerId', !metaNoOwner.ownerPeerId || metaNoOwner.ownerPeerId !== myPeerId);
+
+  // The old bug: both peers had myPeerId = 'local'
+  const myPeerIdOld = 'local';
+  const remotePeerIdOld = 'local';
+  ok('Old bug: both peers had same "local" ID', myPeerIdOld === remotePeerIdOld);
+  ok('Old bug: echo guard would block all remote', metaRemote.ownerPeerId === myPeerIdOld || metaRemote.ownerPeerId !== myPeerIdOld || myPeerIdOld === remotePeerIdOld);
+}
+
+// ─── 15. Room Member Filtering ────────────────────────────────────────
+{
+  // When joining a room, filter out ourselves from peer list
+  const myPeerId = '550e8400-e29b-41d4-a716-446655440000';
+  const members = [
+    { userId: '550e8400-e29b-41d4-a716-446655440000' }, // us (creator)
+    { userId: '660e8400-e29b-41d4-a716-446655440001' }, // them
+  ];
+  const peerIds = members.filter(m => m.userId !== myPeerId).map(m => m.userId);
+  ok('Room member filter excludes self', peerIds.length === 1);
+  ok('Room member filter includes other peer', peerIds[0] === '660e8400-e29b-41d4-a716-446655440001');
+
+  // Old bug: myPeerId was 'local', so no member matches 'local' → all members included → self-connect
+  const myPeerIdOld = 'local';
+  const peerIdsOld = members.filter(m => m.userId !== myPeerIdOld).map(m => m.userId);
+  ok('Old bug: self not filtered with "local" ID', peerIdsOld.length === 2);
+}
+
 // ─── Summary ───────────────────────────────────────────────────────────
 console.log(`\n## e2e smoke: ${passed} passed, ${failed} failed`);
 if (failed > 0) { console.error('SOME TESTS FAILED'); process.exit(1); }

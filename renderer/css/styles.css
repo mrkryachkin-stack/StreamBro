@@ -138,6 +138,15 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .logo-text{font-size:16px;font-weight:800;letter-spacing:1px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .top-bar-center{flex:1;display:flex;justify-content:center;align-items:center;gap:14px}
 .room-status,.stream-status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)}
+.btn-leave-room{font-size:10px!important;padding:2px 8px!important;border-radius:4px!important;color:#ef4444!important;border-color:rgba(220,38,38,.3)!important;background:rgba(220,38,38,.1)!important}
+.btn-leave-room:hover{background:rgba(220,38,38,.25)!important}
+.net-status{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2);padding:2px 8px;border-radius:8px;background:rgba(127,127,127,.06);border:1px solid transparent;transition:all var(--tr)}
+.net-status.net-offline{border-color:rgba(231,76,60,.35);background:rgba(231,76,60,.08)}
+.net-status.net-weak{border-color:rgba(240,160,48,.30);background:rgba(240,160,48,.06)}
+.net-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--green);box-shadow:0 0 6px rgba(46,204,113,.5);transition:background var(--tr),box-shadow var(--tr)}
+.net-offline .net-dot{background:var(--red);box-shadow:0 0 8px rgba(231,76,60,.6);animation:pulse 1.5s infinite}
+.net-weak .net-dot{background:var(--orange);box-shadow:0 0 6px rgba(240,160,48,.5)}
+.net-text{white-space:nowrap}
 .status-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;transition:background var(--tr),box-shadow var(--tr)}
 .status-dot.offline{background:var(--muted)}
 .status-dot.connecting,.status-dot.reconnecting{background:var(--orange);animation:pulse 1.5s infinite}
@@ -194,6 +203,23 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 
 /* ─── Main layout ─── */
 .main-content{display:flex;flex:1;overflow:hidden;min-height:0}
+/* Sidebar resize handle — thin vertical strip on the left edge of sidebar */
+.sidebar-resize{
+  width:5px;cursor:col-resize;flex-shrink:0;
+  background:transparent;position:relative;z-index:5;
+  transition:background .15s;
+}
+.sidebar-resize:hover,.sidebar-resize.active{
+  background:var(--accent-g,rgba(255,210,60,.25));
+}
+.sidebar-resize::after{
+  content:'';position:absolute;left:1px;top:50%;transform:translateY(-50%);
+  width:3px;height:32px;border-radius:2px;
+  background:rgba(255,255,255,.15);transition:background .15s;
+}
+.sidebar-resize:hover::after,.sidebar-resize.active::after{
+  background:var(--accent,#ffd23c);
+}
 .scene-area{
   flex:1;padding:8px;min-width:0;position:relative;display:flex;flex-direction:column;
   background:var(--scene-area-bg),var(--bg0);
@@ -233,6 +259,33 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 }
 #sceneCanvas{max-width:100%;max-height:100%;object-fit:contain;position:relative;z-index:2;background:transparent}
 #sceneOverlay{position:absolute;z-index:3;pointer-events:none}
+
+/* ─── Scenes section (bottom panel) ─── */
+.scenes-section{min-width:140px;max-width:180px;flex-shrink:0}
+.scenes-list{display:flex;flex-direction:column;gap:2px;max-height:calc(3 * 28px + 4px);overflow-y:auto;overflow-x:hidden;padding-right:2px}
+.scenes-list::-webkit-scrollbar{width:3px}
+.scenes-list::-webkit-scrollbar-thumb{background:rgba(127,127,127,.3);border-radius:2px}
+.scene-preset-item{
+  display:flex;align-items:center;gap:4px;
+  padding:4px 6px;border-radius:4px;cursor:pointer;
+  transition:background .12s;font-size:11px;height:24px;
+}
+.scene-preset-item:hover{background:rgba(127,127,127,.15)}
+.scene-preset-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scene-preset-load,.scene-preset-del{
+  background:none;border:none;cursor:pointer;
+  font-size:10px;padding:1px 3px;border-radius:3px;
+  color:var(--muted);transition:color .12s,background .12s;
+  line-height:1;
+}
+.scene-preset-load:hover{color:var(--accent);background:rgba(127,127,127,.12)}
+.scene-preset-del:hover{color:#f87171;background:rgba(248,113,113,.1)}
+.scenes-save-row{margin-top:4px}
+.scenes-save-row input{
+  width:100%;background:rgba(127,127,127,.1);border:1px solid rgba(127,127,127,.2);
+  border-radius:4px;padding:3px 6px;color:var(--text);font-size:11px;outline:none;
+}
+.scenes-save-row input:focus{border-color:var(--accent)}
 /* Превью камеры/рамки — мягкий двух-цветный фон, чтобы edge-dissolve был ВИДЕН.
    Используется внутри .transparent-preview обёрток. */
 .transparent-preview{
@@ -380,8 +433,26 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 [data-theme='neon'] .stream-uptime{color:#5ed1ff;text-shadow:0 0 22px rgba(94,209,255,.45)}
 
 /* ─── Bottom Panel ─── */
+/* Bottom resize handle — thin horizontal strip above the panel */
+.bottom-resize{
+  height:5px;cursor:row-resize;flex-shrink:0;
+  background:transparent;position:relative;z-index:5;
+  transition:background .15s;
+}
+.bottom-resize:hover,.bottom-resize.active{
+  background:var(--accent-g,rgba(255,210,60,.25));
+}
+.bottom-resize::after{
+  content:'';position:absolute;top:1px;left:50%;transform:translateX(-50%);
+  width:32px;height:3px;border-radius:2px;
+  background:rgba(255,255,255,.15);transition:background .15s;
+}
+.bottom-resize:hover::after,.bottom-resize.active::after{
+  background:var(--accent,#ffd23c);
+}
 .bottom-panel{height:var(--bottom-h);flex-shrink:0;display:flex;border-top:1px solid var(--glass-border);background:var(--glass);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);overflow:hidden}
 .bottom-section{flex:1;overflow-y:auto;padding:5px 10px;min-width:0}
+.scenes-section{min-width:130px;max-width:170px;flex:0 0 auto}
 .bottom-sep{width:1px;background:var(--glass-border);flex-shrink:0}
 .bottom-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;padding-bottom:3px;border-bottom:1px solid rgba(127,127,127,.08)}
 .bottom-header h3{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted)}
@@ -462,9 +533,18 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .ctx-submenu-parent>.ctx-item{pointer-events:auto}
 .ctx-submenu{display:none;position:absolute;left:100%;top:0;min-width:160px;padding:4px;border-radius:var(--r);box-shadow:var(--shadow);background:var(--bg1);border:1px solid var(--glass-border)}
 .ctx-submenu-parent:hover>.ctx-submenu{display:block}
-.fx-section{background:rgba(127,127,127,.05);border:1px solid var(--glass-border);border-radius:var(--r-sm);padding:10px 12px}
+.fx-section{background:rgba(127,127,127,.05);border:1px solid var(--glass-border);border-radius:var(--r-sm);padding:10px 12px;margin-bottom:6px}
 .fx-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-.fx-name{font-size:12px;font-weight:600;color:var(--text)}
+.fx-name{font-size:13px;font-weight:700;color:var(--text);letter-spacing:.4px}
+.fx-collapsible{border-left:3px solid var(--accent);background:rgba(127,127,127,.08);margin-bottom:8px}
+.fx-collapsible .coll-toggle{padding:8px 10px}
+.fx-section:not(.fx-collapsible){margin-bottom:6px}
+.fx-collapsible .coll-toggle{display:flex;align-items:center;gap:8px;user-select:none;cursor:pointer;border-radius:8px;padding:6px 8px;transition:background .15s ease}
+.fx-collapsible .coll-toggle:hover{background:rgba(255,255,255,.06)}
+.fx-collapsible .coll-arrow{margin-left:auto;color:var(--accent);font-size:11px;transition:transform .2s ease}
+.fx-collapsible .coll-body{max-height:0;overflow:hidden;transition:max-height .35s cubic-bezier(.2,.7,.2,1),opacity .25s ease,padding .25s ease;opacity:0;padding-top:0;padding-bottom:0}
+.fx-collapsible.open .coll-body{max-height:2000px;opacity:1;padding-top:8px;padding-bottom:4px}
+.fx-collapsible.open .coll-arrow{transform:rotate(0deg)}
 .fx-badge{font-size:9px;font-weight:700;padding:2px 8px;border-radius:10px;background:rgba(127,127,127,.10);color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
 .fx-badge.on{background:var(--accent-g);color:var(--accent)}
 .fx-switch{display:flex;align-items:center;gap:6px;cursor:pointer}
@@ -484,14 +564,6 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .fx-preset-btn{font-size:10px;padding:3px 10px;border:1px solid rgba(127,127,127,.20);border-radius:6px;background:rgba(127,127,127,.06);color:var(--text2);cursor:pointer;transition:all var(--tr)}
 .fx-preset-btn:hover{border-color:var(--accent);color:var(--text);background:var(--accent-g)}
 .fx-preset-btn.active{border-color:var(--accent);background:var(--accent-g);color:var(--accent)}
-
-/* Collapsible fx-section */
-.fx-collapsible .coll-toggle{display:flex;align-items:center;gap:8px;user-select:none;cursor:pointer;border-radius:8px;padding:6px 8px;transition:background .15s ease}
-.fx-collapsible .coll-toggle:hover{background:rgba(255,255,255,.04)}
-.fx-collapsible .coll-arrow{margin-left:auto;color:var(--muted);font-size:11px;transition:transform .2s ease}
-.fx-collapsible .coll-body{max-height:0;overflow:hidden;transition:max-height .35s cubic-bezier(.2,.7,.2,1),opacity .25s ease,padding .25s ease;opacity:0;padding-top:0;padding-bottom:0}
-.fx-collapsible.open .coll-body{max-height:2000px;opacity:1;padding-top:8px;padding-bottom:4px}
-.fx-collapsible.open .coll-arrow{transform:rotate(0deg)}
 
 /* Frame preset buttons — colored pill style */
 .frame-preset{font-size:11px;padding:5px 11px;border-radius:14px;font-weight:500;transition:all .25s cubic-bezier(.2,.7,.2,1)}
@@ -584,6 +656,18 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:var(--bg0);color
 .room-code{font-size:18px;font-weight:800;letter-spacing:2px;color:var(--accent);font-variant-numeric:tabular-nums;padding:8px;background:rgba(0,0,0,.18);border-radius:var(--r);margin-bottom:6px;word-break:break-all}
 .room-code-input{font-size:18px!important;letter-spacing:2px;text-align:center;text-transform:uppercase}
 
+/* My Rooms list */
+.my-room-card{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r);background:rgba(127,127,127,.06);border:1px solid var(--glass-border);margin-bottom:8px;transition:background var(--tr)}
+.my-room-card:hover{background:rgba(127,127,127,.12)}
+.my-room-current{border-color:var(--accent);background:rgba(var(--accent-g,.5),.08)}
+.my-room-info{flex:1;min-width:0}
+.my-room-name{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.my-room-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.my-room-actions{display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap}
+.btn-danger{background:rgba(220,38,38,.18)!important;color:#ef4444!important;border-color:rgba(220,38,38,.3)!important}
+.btn-danger:hover{background:rgba(220,38,38,.32)!important}
+#activeRoomCode{font-variant-numeric:tabular-nums}
+
 /* TURN relay section */
 .turn-details{margin-bottom:12px;border:1px solid var(--glass-border);border-radius:var(--r-sm);overflow:hidden}
 .turn-details summary{padding:8px 12px;font-size:11px;color:var(--text2);cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:6px}
@@ -654,6 +738,19 @@ select option{
 
 /* ─── Friends sidebar section ─── */
 .friends-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 6px;border-radius:9px;background:var(--red);color:#fff;font-size:10px;font-weight:700;margin-left:6px;vertical-align:middle}
+.friends-badge.green-dot{
+  min-width:0;width:10px;height:10px;padding:0;
+  border-radius:50%;
+  background:rgba(46,204,113,.45);
+  border:1.5px solid var(--green);
+  box-shadow:0 0 8px rgba(46,204,113,.35);
+  animation:greenDotPulse 1.6s ease-in-out infinite;
+  color:transparent;font-size:0;
+}
+@keyframes greenDotPulse{
+  0%,100%{box-shadow:0 0 4px rgba(46,204,113,.25);transform:scale(1)}
+  50%{box-shadow:0 0 12px rgba(46,204,113,.55);transform:scale(1.25)}
+}
 .friends-toolbar{margin:6px 0 10px}
 /* No max-height here on purpose — would clip the inline chat panel.
    Scrolling for very long friend lists is delegated to the surrounding
@@ -665,6 +762,10 @@ select option{
 .friends-empty{padding:14px 8px;text-align:center;color:var(--text2);font-size:12px;line-height:1.5}
 .friends-empty p{margin:0 0 4px}
 .friends-empty-sub{color:var(--muted);font-size:11px}
+.friends-loading{padding:8px 0}
+.friend-skeleton{height:42px;border-radius:8px;background:linear-gradient(90deg,var(--bg2) 25%,var(--bg3) 50%,var(--bg2) 75%);background-size:200% 100%;animation:friendShimmer 1.5s ease-in-out infinite;margin-bottom:6px}
+@keyframes friendShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.reduced-motion .friend-skeleton{animation:none;background:var(--bg2)}
 
 /* Self-status row at the top of Друзья section */
 .self-status-row{display:flex;align-items:center;gap:10px;padding:8px 8px 10px;border-bottom:1px solid var(--glass-border);margin-bottom:8px}
@@ -735,36 +836,34 @@ select option{
   color:var(--text)!important;
   box-shadow:0 0 0 1px rgba(239,68,68,.15) inset!important;
 }
-/* New message badge on friend card */
-.friend-new-msg{
-  display:inline-flex;align-items:center;gap:3px;
-  background:var(--accent);color:#fff;
-  font-size:0.65rem;font-weight:700;
-  padding:0.1rem 0.45rem;border-radius:999px;
-  margin-left:0.3rem;
-  animation:newMsgPulse 1.5s ease-in-out infinite;
+/* Unread avatar ring — pulsing green glow */
+.friend-avatar.avatar-unread{
+  border-color:var(--green);
+  box-shadow:0 0 0 0 rgba(46,204,113,.4);
+  animation:avatarUnreadPulse 1.6s ease-in-out infinite;
 }
-@keyframes newMsgPulse{
-  0%,100%{box-shadow:0 0 0 0 var(--accent)}
-  50%{box-shadow:0 0 0 4px rgba(139,92,246,0.0)}
+@keyframes avatarUnreadPulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(46,204,113,.4)}
+  50%{box-shadow:0 0 0 5px rgba(46,204,113,0)}
 }
+
 .friend-item.has-unread{
-  background:linear-gradient(90deg,rgba(139,92,246,0.08),transparent 70%);
-  border-left:2px solid var(--accent);
+  background:linear-gradient(90deg,rgba(46,204,113,.06),transparent 70%);
+  border-left:2px solid var(--green);
 }
 
 /* Pulsing envelope for unread */
-.mail-pulse{position:relative;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;animation:envelopePulse 1.6s ease-in-out infinite}
-.mail-pulse-count{position:absolute;top:-6px;right:-7px;background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:8px;min-width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;padding:0 3px;border:1.5px solid var(--bg1)}
+.mail-pulse{position:relative;color:var(--green);display:inline-flex;align-items:center;justify-content:center;animation:envelopePulse 1.6s ease-in-out infinite;filter:drop-shadow(0 0 2px rgba(46,204,113,.5))}
 @keyframes envelopePulse{
-  0%,100%{transform:scale(1);filter:drop-shadow(0 0 0 var(--accent))}
-  50%{transform:scale(1.18);filter:drop-shadow(0 0 6px var(--accent))}
+  0%,100%{transform:scale(1);filter:drop-shadow(0 0 2px rgba(46,204,113,.3))}
+  50%{transform:scale(1.22);filter:drop-shadow(0 0 8px rgba(46,204,113,.7))}
 }
 
 /* Chat panel (expands under friend row).
    Cap total height so a tall chat doesn't push other friends offscreen;
    the inner messages list owns the scroll. */
 .friend-chat{padding:6px 8px 8px;border-top:1px solid var(--glass-border);background:rgba(0,0,0,.18);display:flex;flex-direction:column;max-height:320px}
+.friend-chat-panel,.friend-chat-panel *{user-select:text;-webkit-user-select:text}
 .chat-messages{display:flex;flex-direction:column;gap:5px;flex:1;min-height:0;max-height:230px;overflow-y:auto;padding:6px 4px;font-size:12px}
 .chat-empty{color:var(--muted);font-size:11px;text-align:center;padding:14px 4px;line-height:1.5}
 .chat-msg{display:flex;flex-direction:column;max-width:78%;padding:6px 9px;border-radius:10px;word-wrap:break-word;line-height:1.35}
@@ -868,14 +967,33 @@ input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.18)}
 
 /* Reduced motion respect */
 .reduced-motion .friend-status-dot.status-streaming,
-.reduced-motion .mail-pulse{animation:none !important}
+.reduced-motion .mail-pulse,
+.reduced-motion .friend-avatar.avatar-unread,
+.reduced-motion .friends-badge.green-dot{animation:none !important}
 
-/* Onboarding wizard */
-.ob-dot{width:9px;height:9px;border-radius:50%;background:var(--muted);display:inline-block;transition:background 0.3s}
-.ob-dot-active{background:var(--accent)!important}
-.ob-step-icon{font-size:48px;text-align:center;margin-bottom:12px}
-.ob-step-title{font-size:1.25rem;font-weight:700;color:var(--text);text-align:center;margin:0 0 10px}
-.ob-step-desc{font-size:0.92rem;color:var(--text2);text-align:center;line-height:1.6;margin:0}
-.ob-step-action{display:flex;justify-content:center;margin-top:18px}
-.ob-action-btn{background:var(--bg2);border:1.5px solid var(--accent);color:var(--accent);padding:9px 22px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;transition:background 0.2s}
-.ob-action-btn:hover{background:var(--accent);color:#fff}
+/* Onboarding interactive tour */
+#onboardingOverlay{position:fixed;inset:0;z-index:10000;pointer-events:none}
+#obBackdrop{position:fixed;inset:0;z-index:10001;pointer-events:auto;background:rgba(0,0,0,.45);backdrop-filter:blur(5px) saturate(.7);-webkit-backdrop-filter:blur(5px) saturate(.7);transition:clip-path .4s cubic-bezier(.25,.8,.25,1)}
+.ob-highlight{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
+#obTooltip{position:fixed;z-index:10002;pointer-events:auto;max-width:370px;width:92%;background:var(--glass);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--glass-border);border-radius:16px;padding:22px 24px 16px;box-shadow:0 12px 48px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.06);transition:top .4s cubic-bezier(.25,.8,.25,1),left .4s cubic-bezier(.25,.8,.25,1)}
+#obArrow{position:absolute;width:0;height:0;filter:drop-shadow(0 2px 4px rgba(0,0,0,.25));transition:left .4s cubic-bezier(.25,.8,.25,1)}
+.ob-arrow-down{border-left:11px solid transparent;border-right:11px solid transparent;border-bottom:13px solid var(--glass-border);animation:obArrowBounce 1.6s ease-in-out infinite}
+.ob-arrow-up{border-left:11px solid transparent;border-right:11px solid transparent;border-top:13px solid var(--glass-border);animation:obArrowBounce 1.6s ease-in-out infinite}
+#obStepNum{font-size:11px;color:var(--accent);font-weight:700;margin-bottom:6px;letter-spacing:1.5px;text-transform:uppercase;opacity:.85}
+#obTitle{font-size:1.1rem;font-weight:700;color:var(--text);margin-bottom:7px;letter-spacing:-.2px}
+#obDesc{font-size:.86rem;color:var(--text2);line-height:1.65;margin:0 0 16px;white-space:pre-line}
+#obFooter{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+#obNeverWrap{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;transition:color .2s}
+#obNeverWrap:hover{color:var(--text2)}
+#obNeverCb{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+#obBtns{display:flex;gap:8px;margin-left:auto}
+#obSkip{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);color:var(--text2);padding:6px 15px;border-radius:8px;cursor:pointer;font-size:12px;transition:all .2s ease}
+#obSkip:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.18);color:var(--text)}
+#obNext{background:var(--accent);color:var(--bg0);border:none;padding:7px 18px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;letter-spacing:.2px;transition:all .2s ease;box-shadow:0 2px 12px var(--accent-g)}
+#obNext:hover{filter:brightness(1.1);box-shadow:0 4px 20px var(--accent-g);transform:translateY(-1px)}
+#obNext:active{transform:translateY(0);filter:brightness(.95)}
+@keyframes obArrowBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(4px)}}
+.reduced-motion #obBackdrop{transition:none;backdrop-filter:none;-webkit-backdrop-filter:none}
+.reduced-motion #obTooltip{transition:none}
+.reduced-motion #obArrow{transition:none;animation:none}
+.reduced-motion .ob-highlight{outline:none}

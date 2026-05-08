@@ -26,6 +26,7 @@
   let _chatLoaded  = {};       // friendId → bool (initial fetch done)
   let _syncTimer = null;
   let _booted = false;
+  let _loading = false;       // show skeleton loader while syncing
 
   // ─── Helpers ───
   function _escape(s) {
@@ -134,6 +135,15 @@
   function _renderList() {
     const el = $('friendsList');
     if (!el) return;
+    // Show skeleton loader while first server sync is in progress and no friends yet
+    if (_loading && !_friends.length) {
+      el.innerHTML = `
+        <div class="friends-loading">
+          <div class="friend-skeleton"></div>
+          <div class="friend-skeleton"></div>
+        </div>`;
+      return;
+    }
     if (!_friends.length) {
       el.innerHTML = `
         <div class="friends-empty">
@@ -151,17 +161,17 @@
       return `
         <div class="friend-item ${isExpanded ? 'expanded' : ''} ${hasMail ? 'has-unread' : ''}" data-fid="${_escape(f.id)}">
           <div class="friend-row" data-action="toggle">
-            <div class="friend-avatar">
+            <div class="friend-avatar${hasMail ? ' avatar-unread' : ''}">
               ${_avatarImg(f.avatar, f.nickname)}
               <span class="friend-status-dot status-${_escape(f.status || 'offline')}" title="${_escape(STATUS_LABELS[f.status] || 'Offline')}"></span>
             </div>
             <div class="friend-meta">
-              <div class="friend-nick">${_escape(f.nickname)}${isSupport ? ' <span style="font-size:0.65rem;background:var(--accent);color:#000;padding:0.1rem 0.35rem;border-radius:4px;font-weight:700;vertical-align:middle;margin-left:0.3rem">Поддержка</span>' : ''}${hasMail ? ` <span class="friend-new-msg">+${unread > 9 ? '9+' : unread}</span>` : ''}</div>
+              <div class="friend-nick">${_escape(f.nickname)}${isSupport ? ' <span style="font-size:0.65rem;background:var(--accent);color:#000;padding:0.1rem 0.35rem;border-radius:4px;font-weight:700;vertical-align:middle;margin-left:0.3rem">Поддержка</span>' : ''}</div>
               <div class="friend-status-text">${STATUS_ICONS[f.status] || '⚫'} ${_escape(STATUS_LABELS[f.status] || 'Не в сети')}</div>
             </div>
             <div class="friend-actions">
               ${hasMail ? `<span class="mail-pulse" title="Новое сообщение">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
               </span>` : ''}
               ${!isSupport ? `<button class="btn-icon sm friend-remove" data-action="remove" title="Удалить из друзей">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -212,10 +222,10 @@
     panel = document.createElement('div');
     panel.id = 'friendChatPanel';
     panel.className = 'friend-chat-panel';
-    panel.style.cssText = 'display:none;position:fixed;right:1rem;bottom:1rem;width:360px;height:480px;background:var(--bg1,#1a1a2e);border:1px solid var(--glass-border,rgba(255,255,255,0.08));border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.5);z-index:9000;flex-direction:column;overflow:hidden;';
+    panel.style.cssText = 'display:none;position:fixed;right:1rem;bottom:1rem;width:360px;height:480px;background:rgba(18,18,21,0.72);backdrop-filter:blur(22px) saturate(1.4);-webkit-backdrop-filter:blur(22px) saturate(1.4);border:1px solid rgba(255,255,255,0.12);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.5);z-index:10002;flex-direction:column;overflow:hidden;pointer-events:auto;';
     panel.innerHTML = `
-      <div class="chat-header" id="chatHeader" style="display:flex;align-items:center;gap:0.5rem;padding:0.6rem 0.8rem;background:var(--bg2,#22223a);border-bottom:1px solid var(--glass-border,rgba(255,255,255,0.08))">
-        <div class="chat-header-avatar" id="chatHeaderAvatar" style="width:32px;height:32px;border-radius:50%;background:var(--bg3,#2a2a48);display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:0.9rem;font-weight:600"></div>
+      <div class="chat-header" id="chatHeader" style="display:flex;align-items:center;gap:0.5rem;padding:0.6rem 0.8rem;background:rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.1)">
+        <div class="chat-header-avatar" id="chatHeaderAvatar" style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:0.9rem;font-weight:600"></div>
         <div style="flex:1;min-width:0">
           <div class="chat-header-nick" id="chatHeaderNick" style="font-weight:600;font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
           <div class="chat-header-status" id="chatHeaderStatus" style="font-size:0.72rem;color:var(--text2,#94a3b8)"></div>
@@ -225,8 +235,8 @@
         </button>
       </div>
       <div class="chat-messages" id="chatMessages" style="flex:1;overflow-y:auto;padding:0.6rem 0.8rem;display:flex;flex-direction:column;gap:0.3rem"></div>
-      <form class="chat-input-row" id="chatInputForm" style="display:flex;gap:0.4rem;padding:0.5rem 0.6rem;background:var(--bg2,#22223a);border-top:1px solid var(--glass-border,rgba(255,255,255,0.08))">
-        <input type="text" id="chatInputField" placeholder="Сообщение..." maxlength="500" autocomplete="off" style="flex:1;background:var(--bg3,#2a2a48);border:1px solid var(--glass-border,rgba(255,255,255,0.08));border-radius:6px;padding:0.5rem 0.7rem;color:var(--text,#fff);font-size:0.85rem;outline:none"/>
+      <form class="chat-input-row" id="chatInputForm" style="display:flex;gap:0.4rem;padding:0.5rem 0.6rem;background:rgba(255,255,255,0.05);border-top:1px solid rgba(255,255,255,0.1)">
+        <input type="text" id="chatInputField" placeholder="Сообщение..." maxlength="500" autocomplete="off" style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:0.5rem 0.7rem;color:var(--text,#fff);font-size:0.85rem;outline:none"/>
         <button type="submit" class="btn-icon" id="chatSendBtn" title="Отправить" style="background:var(--accent,#8b5cf6);border:none;cursor:pointer;color:#fff;border-radius:6px;padding:0 0.7rem">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
@@ -247,8 +257,11 @@
       if (!text || !_expanded) return;
       input.value = '';
       input.disabled = true;
+      let finished = false;
+      const unlock = setTimeout(() => { if (!finished && input) { input.disabled = false; input.focus(); } }, 10000);
       try {
         const r = await window.electronAPI.friendsSendMessage(_expanded, text);
+        finished = true;
         if (r && (r.success || r.id || r.ok)) {
           try { window.SBSounds && window.SBSounds.play('success'); } catch (er) {}
           const myUserId = _myUserId();
@@ -268,22 +281,22 @@
           if (window.msg) window.msg('Ошибка отправки сообщения');
         }
       } catch (err) {
+        finished = true;
         if (window.msg) window.msg('Ошибка: ' + (err.message || err));
       } finally {
+        clearTimeout(unlock);
+        if (!finished) finished = true;
         input.disabled = false;
         input.focus();
       }
     });
 
-    // Wire context menu on messages
-    const msgsEl = $('chatMessages');
-    msgsEl && msgsEl.addEventListener('contextmenu', (e) => {
-      const msgEl = e.target.closest('.chat-msg');
-      if (!msgEl) return;
-      const msgId = msgEl.dataset.msgId;
-      const isOwn = msgEl.dataset.fromMe === '1';
+    // Wire context menu on the entire chat panel (messages + input)
+    const panelEl = $('friendChatPanel');
+    panelEl && panelEl.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      _showMsgContextMenu(e, msgId, _expanded, msgEl, isOwn);
+      e.stopPropagation();
+      _showChatContextMenu(e);
     });
 
     return panel;
@@ -308,7 +321,17 @@
 
     // Render cached messages immediately, then load fresh from server in background
     _renderChatMessages();
-    setTimeout(() => { $('chatInputField') && $('chatInputField').focus(); }, 50);
+
+    // Ensure input is enabled and focused
+    const chatInput = $('chatInputField');
+    if (chatInput) {
+      chatInput.disabled = false;
+      chatInput.readOnly = false;
+    }
+    setTimeout(() => {
+      const inp = $('chatInputField');
+      if (inp) { inp.disabled = false; inp.focus(); }
+    }, 100);
 
     if (!_chatLoaded[friendId]) {
       _loadChatFromServer(friendId);
@@ -319,6 +342,8 @@
 
     // Mark read + update badge IMMEDIATELY (optimistic UI), then async server call
     _unread[friendId] = 0;
+    _markFriendRead(friendId);
+    _hideBadgeNow();
     _renderList();
     _updateBadge();
     window.electronAPI.friendsMarkRead(friendId).catch(() => {});
@@ -399,61 +424,121 @@
     }
   }
 
-  function _showMsgContextMenu(e, msgId, friendId, msgEl, isOwn) {
+  function _showChatContextMenu(e) {
     const existing = document.querySelector('.chat-ctx-menu');
     if (existing) existing.remove();
 
-    const msgTs = msgEl.dataset.ts ? parseInt(msgEl.dataset.ts) : 0;
-    const canEdit = isOwn && msgId && msgTs && (Date.now() - msgTs < 2 * 60 * 1000);
+    const inputEl = e.target.closest('#chatInputField');
+    const msgEl = e.target.closest('.chat-msg');
+
+    // Only show menu on messages or input field — not on empty areas
+    if (!msgEl && !inputEl) return;
 
     const menu = document.createElement('div');
     menu.className = 'chat-ctx-menu';
-    menu.style.cssText = `position:fixed;left:-9999px;top:-9999px;background:var(--bg1,#1a1a2e);border:1px solid var(--glass-border,rgba(255,255,255,0.08));border-radius:8px;padding:4px 0;z-index:10001;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.4);`;
+    // Glassmorphism: semi-transparent + backdrop blur + subtle border
+    menu.style.cssText = `position:fixed;left:-9999px;top:-9999px;background:rgba(26,26,46,0.72);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:5px 0;z-index:10003;min-width:170px;box-shadow:0 8px 32px rgba(0,0,0,.45);`;
 
-    if (isOwn && msgId && !String(msgId).startsWith('local-')) {
-      if (canEdit) {
-        const editBtn = document.createElement('div');
-        editBtn.textContent = '✏️ Редактировать';
-        editBtn.style.cssText = 'padding:7px 14px;cursor:pointer;font-size:0.82rem;color:var(--text,#fff);';
-        editBtn.addEventListener('mouseenter', () => { editBtn.style.background = 'var(--bg2,#22223a)'; });
-        editBtn.addEventListener('mouseleave', () => { editBtn.style.background = ''; });
-        editBtn.addEventListener('click', () => { menu.remove(); _startInlineEdit(msgId, friendId, msgEl); });
-        menu.appendChild(editBtn);
-      }
-
-      const deleteBtn = document.createElement('div');
-      deleteBtn.textContent = '🗑️ Удалить';
-      deleteBtn.style.cssText = 'padding:7px 14px;cursor:pointer;font-size:0.82rem;color:var(--red,#ef4444);';
-      deleteBtn.addEventListener('mouseenter', () => { deleteBtn.style.background = 'var(--bg2,#22223a)'; });
-      deleteBtn.addEventListener('mouseleave', () => { deleteBtn.style.background = ''; });
-      deleteBtn.addEventListener('click', async () => {
-        menu.remove();
-        if (!confirm('Удалить сообщение?')) return;
-        const r = await window.electronAPI.chatDelete(msgId);
-        if (r && (r.ok || r.success)) {
-          msgEl.remove();
-          _chatMessages[friendId] = (_chatMessages[friendId] || []).filter(m => (m.id !== msgId && m.messageId !== msgId));
-        } else {
-          if (window.msg) window.msg((r && r.error) || 'Ошибка удаления');
-        }
-      });
-      menu.appendChild(deleteBtn);
+    function addItem(label, color, action, topBorder) {
+      const btn = document.createElement('div');
+      btn.textContent = label;
+      btn.style.cssText = `padding:8px 16px;cursor:pointer;font-size:0.82rem;color:${color};border-radius:6px;margin:0 4px;${topBorder ? 'border-top:1px solid rgba(255,255,255,0.08);margin-top:3px;padding-top:10px;' : ''}`;
+      btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(255,255,255,0.1)'; });
+      btn.addEventListener('mouseleave', () => { btn.style.background = ''; });
+      btn.addEventListener('click', () => { menu.remove(); action(); });
+      menu.appendChild(btn);
     }
 
-    const copyBtn = document.createElement('div');
-    copyBtn.textContent = '📋 Копировать';
-    copyBtn.style.cssText = `padding:7px 14px;cursor:pointer;font-size:0.82rem;color:var(--text,#fff);${isOwn && msgId ? 'border-top:1px solid var(--glass-border,rgba(255,255,255,0.08));margin-top:2px;' : ''}`;
-    copyBtn.addEventListener('mouseenter', () => { copyBtn.style.background = 'var(--bg2,#22223a)'; });
-    copyBtn.addEventListener('mouseleave', () => { copyBtn.style.background = ''; });
-    copyBtn.addEventListener('click', () => {
-      menu.remove();
-      const text = msgEl.querySelector('.chat-msg-text')?.textContent || '';
-      navigator.clipboard.writeText(text).catch(() => {});
-    });
-    menu.appendChild(copyBtn);
+    function addSeparator() {
+      const sep = document.createElement('div');
+      sep.style.cssText = 'height:1px;background:rgba(255,255,255,0.08);margin:4px 8px;';
+      menu.appendChild(sep);
+    }
+
+    // ── Context: message ──
+    if (msgEl) {
+      const msgId = msgEl.dataset.msgId;
+      const isOwn = msgEl.dataset.fromMe === '1';
+      const msgTs = msgEl.dataset.ts ? parseInt(msgEl.dataset.ts) : 0;
+      const canEdit = isOwn && msgId && msgTs && (Date.now() - msgTs < 2 * 60 * 1000);
+
+      addItem('Копировать', 'var(--text,#e2e8f0)', () => {
+        const text = msgEl.querySelector('.chat-msg-text')?.textContent || '';
+        navigator.clipboard.writeText(text).catch(() => {});
+      });
+
+      addItem('Вставить', 'var(--text,#e2e8f0)', () => {
+        const inp = $('chatInputField');
+        if (inp) { navigator.clipboard.readText().then(t => { inp.value += t; inp.focus(); }).catch(() => {}); }
+      });
+
+      if (canEdit) {
+        addSeparator();
+        addItem('Редактировать', 'var(--accent,#8b5cf6)', () => {
+          _startInlineEdit(msgId, _expanded, msgEl);
+        });
+      }
+
+      if (isOwn && msgId && !String(msgId).startsWith('local-')) {
+        if (!canEdit) addSeparator();
+        addItem('Удалить', '#ef4444', async () => {
+          if (!confirm('Удалить сообщение?')) return;
+          const r = await window.electronAPI.chatDelete(msgId);
+          if (r && (r.ok || r.success)) {
+            msgEl.remove();
+            _chatMessages[_expanded] = (_chatMessages[_expanded] || []).filter(m => (m.id !== msgId && m.messageId !== msgId));
+          } else {
+            if (window.msg) window.msg((r && r.error) || 'Ошибка удаления');
+          }
+        });
+      }
+    }
+
+    // ── Context: input field (not on a message) ──
+    if (inputEl && !msgEl) {
+      const hasSelection = inputEl.selectionStart !== inputEl.selectionEnd;
+
+      if (hasSelection) {
+        addItem('Вырезать', 'var(--text,#e2e8f0)', () => {
+          const sel = inputEl.value.substring(inputEl.selectionStart, inputEl.selectionEnd);
+          navigator.clipboard.writeText(sel).catch(() => {});
+          const before = inputEl.value.substring(0, inputEl.selectionStart);
+          const after = inputEl.value.substring(inputEl.selectionEnd);
+          inputEl.value = before + after;
+          inputEl.focus();
+        });
+      }
+
+      if (hasSelection) {
+        addItem('Копировать', 'var(--text,#e2e8f0)', () => {
+          const sel = inputEl.value.substring(inputEl.selectionStart, inputEl.selectionEnd);
+          navigator.clipboard.writeText(sel).catch(() => {});
+        });
+      }
+
+      addItem('Вставить', 'var(--text,#e2e8f0)', () => {
+        navigator.clipboard.readText().then(t => {
+          if (!t) return;
+          const start = inputEl.selectionStart;
+          const before = inputEl.value.substring(0, start);
+          const after = inputEl.value.substring(inputEl.selectionEnd);
+          inputEl.value = before + t + after;
+          inputEl.selectionStart = inputEl.selectionEnd = start + t.length;
+          inputEl.focus();
+        }).catch(() => {});
+      });
+
+      addItem('Выделить всё', 'var(--text,#e2e8f0)', () => {
+        inputEl.select();
+        inputEl.focus();
+      });
+    }
+
+    // Don't show empty menu
+    if (!menu.children.length) { menu.remove(); return; }
 
     document.body.appendChild(menu);
-    const mw = menu.offsetWidth || 160;
+    const mw = menu.offsetWidth || 170;
     const mh = menu.offsetHeight || 80;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -466,9 +551,9 @@
     menu.style.top = y + 'px';
 
     const closeHandler = (ev) => {
-      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', closeHandler); }
+      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', closeHandler); document.removeEventListener('contextmenu', closeHandler); }
     };
-    setTimeout(() => document.addEventListener('click', closeHandler), 10);
+    setTimeout(() => { document.addEventListener('click', closeHandler); document.addEventListener('contextmenu', closeHandler); }, 10);
   }
 
   function _startInlineEdit(msgId, friendId, msgEl) {
@@ -615,10 +700,23 @@
   async function refresh() {
     try {
       _friends = await window.electronAPI.friendsList();
-      _unread  = await window.electronAPI.friendsUnread();
+      const serverUnread = await window.electronAPI.friendsUnread();
+      // Take server unread, but sanitize: only keep keys that match actual friend IDs
+      // (old server /chat/unread/count returned {count:N} which polluted _unread)
+      _unread = {};
+      if (serverUnread && typeof serverUnread === 'object' && !Array.isArray(serverUnread)) {
+        for (const [k, v] of Object.entries(serverUnread)) {
+          if (typeof v === 'number' && v > 0) _unread[k] = v;
+        }
+      }
     } catch (e) { _friends = []; _unread = {}; }
-    // Active chat is being viewed → keep its unread at 0
-    if (_expanded) _unread[_expanded] = 0;
+    _loading = false;
+    // Active chat is being viewed → keep its unread at 0 + remove visual indicators
+    if (_expanded) {
+      _unread[_expanded] = 0;
+      _markFriendRead(_expanded);
+      _hideBadgeNow();
+    }
     _renderList();
     _updateBadge();
     // Update chat header status if open
@@ -636,11 +734,82 @@
   function _updateBadge() {
     const badge = $('friendsBadge');
     if (!badge) return;
+    // Sanitize: remove non-friend keys (e.g. stale "count" from old server response)
+    for (const k of Object.keys(_unread)) {
+      if (!_friends.some(f => f.id === k)) delete _unread[k];
+    }
     const notif = _getGlobalNotif();
     const showBadge = notif.badge !== false;
-    const total = Object.values(_unread).reduce((s, c) => s + (c || 0), 0);
-    if (total > 0 && showBadge) { badge.textContent = total > 99 ? '99+' : total; badge.style.display = 'inline-flex'; }
-    else { badge.style.display = 'none'; }
+    // Force expanded chat's unread to 0 — server data may lag behind markRead
+    if (_expanded) _unread[_expanded] = 0;
+    const hasUnread = Object.values(_unread).some(c => (c || 0) > 0);
+    if (hasUnread && showBadge) { badge.textContent = ''; badge.className = 'friends-badge green-dot'; badge.style.display = 'inline-flex'; }
+    else { badge.style.display = 'none'; badge.className = 'friends-badge'; }
+  }
+
+  // Force-hide badge immediately (before any async server calls)
+  function _hideBadgeNow() {
+    const badge = $('friendsBadge');
+    if (!badge) return;
+    // Sanitize: remove non-friend keys (e.g. stale "count" from old server response)
+    for (const k of Object.keys(_unread)) {
+      if (!_friends.some(f => f.id === k)) delete _unread[k];
+    }
+    // Re-check with current local state — if all read, hide instantly
+    if (_expanded) _unread[_expanded] = 0;
+    const hasUnread = Object.values(_unread).some(c => (c || 0) > 0);
+    if (!hasUnread) { badge.style.display = 'none'; badge.className = 'friends-badge'; }
+  }
+
+  function _markFriendUnread(friendId) {
+    const row = document.querySelector(`.friend-item[data-fid="${friendId}"]`);
+    if (!row) return;
+    row.classList.add('has-unread');
+    const avatar = row.querySelector('.friend-avatar');
+    if (avatar && !avatar.classList.contains('avatar-unread')) avatar.classList.add('avatar-unread');
+    const actions = row.querySelector('.friend-actions');
+    if (actions && !actions.querySelector('.mail-pulse')) {
+      const span = document.createElement('span');
+      span.className = 'mail-pulse';
+      span.title = 'Новое сообщение';
+      span.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>';
+      actions.insertBefore(span, actions.firstChild);
+    }
+  }
+
+  function _markFriendRead(friendId) {
+    const row = document.querySelector(`.friend-item[data-fid="${friendId}"]`);
+    if (!row) return;
+    row.classList.remove('has-unread');
+    const avatar = row.querySelector('.friend-avatar');
+    if (avatar) avatar.classList.remove('avatar-unread');
+    const pulse = row.querySelector('.mail-pulse');
+    if (pulse) pulse.remove();
+  }
+
+  function _updateFriendStatusDOM(friendId, status) {
+    // Try both friendId and serverId to find the row
+    let row = document.querySelector(`.friend-item[data-fid="${friendId}"]`);
+    if (!row) {
+      // Search by serverId match
+      row = document.querySelector(`.friend-item[data-fid]`);
+      if (row) {
+        const f = _friends.find(x => x.id === friendId || x.serverId === friendId);
+        if (f) row = document.querySelector(`.friend-item[data-fid="${f.id}"]`);
+      }
+    }
+    if (!row) return;
+    // Update status dot
+    const dot = row.querySelector('.friend-status-dot');
+    if (dot) {
+      dot.className = 'friend-status-dot status-' + _escape(status);
+      dot.title = _escape(STATUS_LABELS[status] || 'Offline');
+    }
+    // Update status text
+    const text = row.querySelector('.friend-status-text');
+    if (text) {
+      text.innerHTML = (STATUS_ICONS[status] || '⚫') + ' ' + _escape(STATUS_LABELS[status] || 'Не в сети');
+    }
   }
 
   // ─── Boot ───
@@ -656,10 +825,24 @@
       _myProfile = window.SBProfile.getCached();
     }
     _renderSelfStatus();
+    // Show cached friends immediately, sync from server in background
+    const isAuthed = _myProfile && (_myProfile.registered || _myProfile.hasToken);
+    _loading = isAuthed;
     await refresh();
+    _loading = false;
+    // Background sync: update from server, then refresh UI with fresh data
+    if (isAuthed) {
+      window.electronAPI.friendsSync()
+        .then(() => refresh())
+        .catch(() => {});
+    }
 
     _syncTimer = setInterval(async () => {
-      try { await window.electronAPI.friendsSync(); } catch (e) {}
+      try {
+        await window.electronAPI.friendsSync();
+        // Sync updates friend data in main process store — refresh UI to reflect new statuses
+        await refresh();
+      } catch (e) {}
     }, 30000);
 
     // Live: friend list changes (accept request, status, etc)
@@ -670,8 +853,21 @@
         }
         try {
           _friends = await window.electronAPI.friendsList();
-          _unread  = await window.electronAPI.friendsUnread();
+          const serverUnread = await window.electronAPI.friendsUnread();
+          // Take server unread, sanitize non-friend keys (e.g. stale "count")
+          _unread = {};
+          if (serverUnread && typeof serverUnread === 'object' && !Array.isArray(serverUnread)) {
+            for (const [k, v] of Object.entries(serverUnread)) {
+              if (typeof v === 'number' && v > 0) _unread[k] = v;
+            }
+          }
+          if (_expanded) _unread[_expanded] = 0;
         } catch (e) {}
+        // Force expanded chat's unread to 0 — server data may lag
+        if (_expanded) {
+          _unread[_expanded] = 0;
+          _markFriendRead(_expanded);
+        }
         _renderList();
         _updateBadge();
         if (data && data.reason === 'friend-added' && _notifSoundAllowed(data.friendId || data.userId)) {
@@ -700,22 +896,36 @@
           if (!exists) _chatMessages[friendId].push(msg);
         }
 
-        // Update unread + badge
-        try { _unread = await window.electronAPI.friendsUnread(); } catch (e) {}
-        _updateBadge();
+        // Update unread — merge server data, but never overwrite local 0 for expanded chat
+        try {
+          const serverUnread = await window.electronAPI.friendsUnread();
+          // Merge: keep local zeroes (expanded chat was read), take server values for others
+          // Sanitize: skip non-friend keys (e.g. stale "count" from old server format)
+          if (serverUnread && typeof serverUnread === 'object' && !Array.isArray(serverUnread)) {
+            for (const [id, val] of Object.entries(serverUnread)) {
+              if (_expanded && id === _expanded) continue; // don't overwrite our local 0
+              if (typeof val === 'number' && val > 0) _unread[id] = val;
+            }
+          }
+        } catch (e) {}
 
-        // If chat is open with this friend → append + mark read
+        // If chat is open with this friend → append + mark read (instant DOM update)
         if (friendId && friendId === _expanded && !isMe) {
           _appendMessageToDOM(msg, myUserId);
-          window.electronAPI.friendsMarkRead(friendId).catch(() => {});
+          _markFriendRead(friendId);
           _unread[friendId] = 0;
-          _updateBadge();
+          _hideBadgeNow();
+          window.electronAPI.friendsMarkRead(friendId).catch(() => {});
         } else if (!isMe) {
-          _renderList(); // refresh list to show mail-pulse
+          // New message from someone else → show unread indicator immediately
+          _unread[friendId] = (_unread[friendId] || 0) + 1;
+          _markFriendUnread(friendId);
           if (_notifSoundAllowed(friendId)) {
             try { window.SBSounds.play('message'); } catch (e) {}
           }
         }
+
+        _updateBadge();
       });
     }
 
@@ -768,6 +978,38 @@
         }
       });
     }
+
+    // Live: friend presence change (online/offline/streaming/dnd/away)
+    if (window.electronAPI && window.electronAPI.onPresenceUpdate) {
+      window.electronAPI.onPresenceUpdate((data) => {
+        if (!data || !data.userId || !data.status) return;
+        const fid = data.userId;
+        // Update local friend data
+        const f = _friends.find(x => x.id === fid || x.serverId === fid);
+        if (!f) return;
+        const oldStatus = f.status;
+        f.status = data.status;
+        // Update DOM directly (avoid full re-render)
+        _updateFriendStatusDOM(fid, data.status);
+        // Update chat header if this friend's chat is open
+        if (_expanded && (_expanded === fid || _expanded === f.id)) {
+          const statusEl = $('chatHeaderStatus');
+          if (statusEl) statusEl.innerHTML = (STATUS_ICONS[data.status] || '⚫') + ' ' + _escape(STATUS_LABELS[data.status] || 'Не в сети');
+        }
+        // Sound when friend comes online
+        if (oldStatus === 'offline' && data.status !== 'offline' && _notifSoundAllowed(f.id)) {
+          try { window.SBSounds.play('friendOnline'); } catch (e) {}
+        }
+      });
+    }
+
+    // Presence WS reconnected — refresh all friend statuses from server
+    if (window.electronAPI && window.electronAPI.onPresenceReconnect) {
+      window.electronAPI.onPresenceReconnect(() => {
+        if (window.__sbDev) console.log('[Friends] Presence reconnected — refreshing statuses');
+        refresh().catch(() => {});
+      });
+    }
   }
 
   function reset() {
@@ -776,6 +1018,7 @@
     _chatMessages = {};
     _chatLoaded = {};
     _unread = {};
+    _loading = false;
     _booted = false;
     if (_syncTimer) { clearInterval(_syncTimer); _syncTimer = null; }
     const el = $('friendsList');

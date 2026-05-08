@@ -2,7 +2,11 @@
 
 (function(){
 'use strict';
-document.oncontextmenu=e=>e.preventDefault();
+document.oncontextmenu=e=>{
+  // Allow right-click in chat panel for copy/edit/delete context menu
+  if(e.target.closest('#friendChatPanel')) return;
+  e.preventDefault();
+};
 
 const HANDLE_R=9, HIT_R=24, ROT_OFF=34, SNAP=30, MIN_DIM=20;
 let _gateWorkletLoaded=null;    // Promise — resolved once noise-gate AudioWorklet is registered
@@ -22,6 +26,7 @@ const S={
   audioDest:null,        // MediaStreamDestination → recording/stream output
   audioNodes:new Map(),  // srcId → { sourceNode, gainNode, monitorGain, analyser, effectsChain }
   audioEffects:new Map(), // srcId → { noiseGate, eqLow, eqMid, eqHigh, compressor, limiter, fxState }
+  _soundsMutedByStream:false,
   // ─── RNNoise AI denoising ───
   _rnnoiseEnabled:false,
   _rnnoiseWasm:null,
@@ -57,23 +62,34 @@ const S={
   co:null,             // CoScene instance (lazy)
   myPeerId:null,       // assigned by signaling server on room-created/joined
   remoteCursors:new Map(), // peerId -> {x,y,t}
+  _handledPeerStreams:new Set(), // stream.id already processed in _onPeerTrack (dedup)
+  _perSourceStreams:new Map(),   // srcId -> MediaStream sent to peers individually
+  _p2pLog:[],                   // P2P debug log — always collected, exportable to file
+  _wrtcPrevPerSource:null,      // Map<srcId, MediaStream> last sent to WebRTC
 };
 const D={};
 function $(id){return document.getElementById(id)}
 
 // ═══════════════════════════════════════════════════════════
-//  CO-SESSION HELPERS
+//  P2P DEBUG LOG — always collects, exportable to file for diagnostics
 // ═══════════════════════════════════════════════════════════
-// Globally-unique source id. Local sources get a UUID at creation; once
-// generated the id stays the same forever and is used as `it.sid` too.
-function _newSid(){
-  if(window.CoSceneHelpers&&window.CoSceneHelpers.newGid) return window.CoSceneHelpers.newGid();
-  return 'g-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
+function _p2pLog(msg){
+  const ts=new Date().toISOString().substr(11,12); // HH:MM:SS.mmm
+  const entry='['+ts+'] '+msg;
+  if(window._sbP2pLog) window._sbP2pLog.push(entry);
+  if(window._sbP2pLog && window._sbP2pLog.length>5000) window._sbP2pLog.splice(0,window._sbP2pLog.length-5000);
+  if(window.__sbDev) console.log(entry);
 }
-// Convenience wrapper — returns true while applying a remote op (suppresses re-broadcast)
+// Re-export globals (streaming.js already created the stub)
+window._p2pLog=_p2pLog;
+window._sbP2pLog=S._p2pLog;
+
+// ═══════════════════════════════════════════════════════════
+//  CO-SESSION HELPERS — delegates to SBSources / inline
+// ═══════════════════════════════════════════════════════════
+function _newSid(){return SBSources.newSid();}
 function _isRemote(){ return S.co && S.co.applyingRemote(); }
-// Returns the gid order of all local + replicated sources (for src.reorder ops)
-function _currentSrcOrder(){ return S.srcs.map(s=>s.id); }
+function _currentSrcOrder(){ return SBSources.currentSrcOrder(); }
 // Debounced src.update broadcaster (used for high-rate UI like volume slider)
 const _coUpdTimers=new Map();
 function _coBroadcastSrcUpdateDebounced(s,delay){
@@ -127,315 +143,216 @@ const framePresets={
 };
 
 // ═══════════════════════════════════════════════════════════
-//  AUDIO — source → gain → audioDest (record/stream)
-//                   gain → analyser (levels)
-//                → monitorGain → audioCtx.destination (speakers/monitoring)
+//  AUDIO — delegates to SBAudio module
 // ═══════════════════════════════════════════════════════════
-function ensureAudioCtx(){
-  if(S.audioCtx && S.audioCtx.state!=='closed') {
-    if(S.audioCtx.state==='suspended') S.audioCtx.resume();
-    return;
+function ensureAudioCtx(){SBAudio.ensureAudioCtx();}
+function _rebuildCombinedStream(){SBAudio._rebuildCombinedStream();}
+function _addCombinedStreamToWebRTC(){SBAudio._addCombinedStreamToWebRTC();}
+function _sendSourceStreamsToPeers(){
+  // Batch-add all local source tracks to all peers.
+  // Initiator: add tracks + trigger renegotiate (sends offer).
+  // Joiner: DO NOT add tracks yet — wait for initiator's offer.
+  //   When offer arrives, handleSignal will call _addTracksOnOffer()
+  //   which attaches our tracks to the transceivers created by the offer.
+  //   This prevents transceiver mismatch (our addTrack creates transceivers
+  //   that don't match the offer's m-lines, causing audio/video not to flow).
+  if(!S.wrtc) return;
+  _p2pLog('[P2P] _sendSourceStreamsToPeers called, peers='+S.wrtc.peers.size+' roomCode='+S.roomCode+' userJoined='+S.wrtc._userJoinedRoom);
+  for(const [pid,pc] of S.wrtc.peers){
+    try{
+      if(pc.isInitiator){
+        // Initiator: add all tracks and renegotiate
+        const existingTrackIds=new Set(pc.pc.getSenders().filter(s=>s.track).map(s=>s.track.id));
+        let added=0;
+        for(const src of S.srcs){
+          if(src.isPeer||!src.stream) continue;
+          const tracks=src.stream.getTracks();
+          if(!tracks.length) continue;
+          for(const track of tracks){
+            if(existingTrackIds.has(track.id)) continue;
+            try{
+              const sender=pc.pc.addTrack(track,src.stream);
+              // Force transceiver direction to sendrecv if addTrack reused a
+              // recvonly/inactive transceiver (created by peer's prior offer).
+              try{
+                const tr=pc.pc.getTransceivers().find(t=>t.sender===sender);
+                if(tr && (tr.direction==='recvonly' || tr.direction==='inactive')){
+                  tr.direction='sendrecv';
+                  _p2pLog('[P2P] Bumped transceiver direction to sendrecv after addTrack reuse: '+track.kind);
+                }
+              }catch(_){}
+              added++;
+            }catch(e){
+              _p2pLog('[P2P] WARN: addTrack failed: '+e.message);
+            }
+          }
+          if(!S._wrtcPrevPerSource) S._wrtcPrevPerSource=new Map();
+          S._wrtcPrevPerSource.set(src.id,src.stream);
+        }
+        pc._needsRenegotiate=true;
+        pc._scheduleRenegotiate();
+        _p2pLog('[P2P] Batch-added '+added+' tracks to initiator peer '+pid+', scheduled renegotiate');
+      }else{
+        // Joiner: do NOT add tracks via addTrack — they would create
+        // mismatched transceivers. Instead, stash our streams and let
+        // handleSignal add them after setRemoteDescription(offer).
+        pc._pendingLocalStreams=[];
+        for(const src of S.srcs){
+          if(src.isPeer||!src.stream) continue;
+          pc._pendingLocalStreams.push(src.stream);
+          if(!S._wrtcPrevPerSource) S._wrtcPrevPerSource=new Map();
+          S._wrtcPrevPerSource.set(src.id,src.stream);
+        }
+        _p2pLog('[P2P] Joiner: stashed '+pc._pendingLocalStreams.length+' streams, waiting for offer');
+        // Fallback: if no offer arrives in 5s (reconnect scenario),
+        // add tracks and renegotiate ourselves
+        if(pc._joinRenegotiateTimer) clearTimeout(pc._joinRenegotiateTimer);
+        pc._joinRenegotiateTimer=setTimeout(()=>{
+          if(pc.pc.signalingState==='stable' && pc._pendingLocalStreams){
+            _p2pLog('[P2P] Joiner fallback: no offer in 5s, adding tracks ourselves for peer '+pid);
+            const existing=new Set(pc.pc.getSenders().filter(s=>s.track).map(s=>s.track.id));
+            for(const stream of pc._pendingLocalStreams){
+              for(const track of stream.getTracks()){
+                if(!existing.has(track.id)){
+                  try{
+                    const sender=pc.pc.addTrack(track,stream);
+                    try{
+                      const tr=pc.pc.getTransceivers().find(t=>t.sender===sender);
+                      if(tr && (tr.direction==='recvonly' || tr.direction==='inactive')){
+                        tr.direction='sendrecv';
+                      }
+                    }catch(_){}
+                  }catch(e){}
+                }
+              }
+            }
+            pc._pendingLocalStreams=null;
+            pc._needsRenegotiate=true;
+            pc._scheduleRenegotiate();
+          }
+        },5000);
+      }
+    }catch(e){ _p2pLog('[P2P] WARN: batch addTracks failed for '+pid+': '+e.message); }
   }
-  S.audioCtx=new AudioContext({sampleRate:48000});
-  S.audioDest=S.audioCtx.createMediaStreamDestination();
-  S.audioNodes.clear();
-  if(window.__sbDev) console.log('[Audio] AudioContext created, state='+S.audioCtx.state);
-  if(S.audioCtx.state==='suspended') S.audioCtx.resume().then(()=>{ if(window.__sbDev) console.log('[Audio] AudioContext resumed'); });
-  // Register noise-gate AudioWorklet (replaces deprecated ScriptProcessorNode)
-  _gateWorkletLoaded = S.audioCtx.audioWorklet.addModule('js/noise-gate-worklet.js')
-    .catch(e=>{ if(window.__sbDev) console.warn('[Audio] noise-gate-worklet load failed, will use passthrough:',e); });
-  // Register RNNoise AudioWorklet (AI denoising, requires rnnoise.wasm)
-  _rnnoiseWorkletLoaded = S.audioCtx.audioWorklet.addModule('js/rnnoise-worklet.js')
-    .catch(e=>{ if(window.__sbDev) console.warn('[Audio] rnnoise-worklet load failed:',e); });
-  for(const src of S.srcs){
-    if(src.stream&&src.stream.getAudioTracks().length) _connectSource(src);
-  }
-  _rebuildCombinedStream();
 }
 
-function _rebuildCombinedStream(){
-  if(!S.audioCtx||!S.audioDest) return;
-  let vt=[];
-  // Reuse single canvas video track — never call captureStream() twice
-  if(S._canvasVideoTrack){
-    // Check track is still alive
-    if(S._canvasVideoTrack.readyState==='live') vt=[S._canvasVideoTrack];
-    else S._canvasVideoTrack=null;
+function _addSourceToPeers(src){
+  // Add a single local source's tracks to all connected peers and renegotiate.
+  // Used when a source is added DURING an active P2P session.
+  // For initial connection, _sendSourceStreamsToPeers() does a batch add instead.
+  if(!S.wrtc||!src||!src.stream) return;
+  const tracks=src.stream.getTracks();
+  if(!tracks.length) return;
+  for(const [pid,pc] of S.wrtc.peers){
+    try{
+      if(!pc.isInitiator && pc._pendingLocalStreams){
+        // Joiner hasn't received offer yet — stash stream
+        pc._pendingLocalStreams.push(src.stream);
+        _p2pLog('[P2P] Joiner: stashed additional source '+src.name+' for later');
+      }else{
+        const existingTrackIds=new Set(pc.pc.getSenders().filter(s=>s.track).map(s=>s.track.id));
+        let added=0;
+        for(const track of tracks){
+          if(existingTrackIds.has(track.id)) continue;
+          try{
+            const sender=pc.pc.addTrack(track,src.stream);
+            // Force transceiver direction to sendrecv. addTrack might reuse a
+            // transceiver previously set to recvonly during a prior answer (e.g.,
+            // when peer's renegotiate offered an m-line we had no track for).
+            // Without this, our track is silently dropped despite having a sender.
+            try{
+              const tr=pc.pc.getTransceivers().find(t=>t.sender===sender);
+              if(tr && (tr.direction==='recvonly' || tr.direction==='inactive')){
+                tr.direction='sendrecv';
+                _p2pLog('[P2P] Bumped transceiver direction to sendrecv after addTrack reuse: '+track.kind);
+              }
+            }catch(_){}
+            added++;
+          }catch(_){}
+        }
+        if(added>0){
+          pc._needsRenegotiate=true;
+          pc._scheduleRenegotiate();
+        }
+      }
+    }catch(e){ _p2pLog('[P2P] WARN: addSourceToPeers failed for '+pid+': '+e.message); }
   }
-  if(!vt.length){
-    const cv=D.sceneCanvas;
-    if(cv && cv.captureStream){
-      const cs=cv.captureStream(S._captureFps||60);
-      vt=cs.getVideoTracks();
-      if(vt.length) S._canvasVideoTrack=vt[0];
-    }
-  }
-  S.combinedStream=new MediaStream([...vt,...S.audioDest.stream.getAudioTracks()]);
-  if(window.__sbDev) console.log('[Audio] Combined: '+vt.length+'v, '+S.audioDest.stream.getAudioTracks().length+'a');
-  if(S.rtmp) S.rtmp.setCombinedStream(S.combinedStream);
+  _p2pLog('[P2P] Added source to peers: '+src.name+' '+src.type);
 }
-
-async function _connectSource(src){
-  if(!S.audioCtx) return;
-  if(S.audioNodes.has(src.id)){
-    const n=S.audioNodes.get(src.id);
-    n.gainNode.gain.value=src.muted?0:src.vol;
-    n.monitorGain.gain.value=src.monitor?(src.muted?0:src.vol):0;
-    return;
+function _removeSourceTracksFromPeers(src){
+  // Remove a local source's tracks from all WebRTC PeerConnections
+  if(!S.wrtc||!src||!src.stream) return;
+  const trackIds=new Set(src.stream.getTracks().map(t=>t.id));
+  if(!trackIds.size) return;
+  for(const [pid,pc] of S.wrtc.peers){
+    try{
+      const senders=pc.pc.getSenders();
+      let removed=0;
+      for(const sender of senders){
+        if(sender.track&&trackIds.has(sender.track.id)){
+          try{ pc.pc.removeTrack(sender); removed++; }catch(_){}
+        }
+      }
+      if(removed>0){
+        pc._needsRenegotiate=true;
+        pc._scheduleRenegotiate();
+      }
+    }catch(e){ _p2pLog('[P2P] WARN: removeTrack failed for '+pid+': '+e.message); }
   }
-  if(!src.stream.getAudioTracks().length) return;
-  if(S.audioCtx.state==='suspended') S.audioCtx.resume();
-
-  const ctx=S.audioCtx;
-  const rawSource=ctx.createMediaStreamSource(src.stream);
-  // channelMode (default 'auto'):
-  //   auto   — mono input → duplicate to both channels; stereo input → pass-through L/R
-  //   mono   — force ch0 to both outputs (sums stereo to centre)
-  //   stereo — leave channels as-is (mono input will only sound in left ear)
-  const mode=src.channelMode||'auto';
-  const splitter=ctx.createChannelSplitter(2);
-  const merger=ctx.createChannelMerger(2);
-  rawSource.connect(splitter);
-  if(mode==='stereo'){
-    splitter.connect(merger,0,0);
-    try{ splitter.connect(merger,1,1); }catch(e){}
-  }else if(mode==='mono'){
-    splitter.connect(merger,0,0);
-    splitter.connect(merger,0,1);
-  }else{
-    splitter.connect(merger,0,0);
-    splitter.connect(merger,0,1);
-    try{ splitter.connect(merger,1,1); }catch(e){}
-  }
-  const sourceNode=merger;
-  // Helper to force stereo mode on an audio node
-  const _stereoIfy=(n)=>{try{n.channelCount=2;n.channelCountMode='explicit';n.channelInterpretation='speakers';}catch(e){}};
-  _stereoIfy(merger);
-  const gainNode=ctx.createGain();
-  _stereoIfy(gainNode);
-  gainNode.gain.value=src.muted?0:src.vol;
-  const monitorGain=ctx.createGain();
-  monitorGain.gain.value=src.monitor?(src.muted?0:src.vol):0;
-  _stereoIfy(monitorGain);
-  const analyser=ctx.createAnalyser();
-  analyser.fftSize=256;
-  analyser.smoothingTimeConstant=0.3;
-
-  // ─── Effects chain (all bypassed by default = clean passthrough) ───
-  const fxState=src.fxState||{noiseGate:false,eq:false,compressor:false,limiter:false,
-    eqLow:0,eqMid:0,eqHigh:0,compThresh:-24,compRatio:4,compGain:6,gateThresh:-40,gateRange:-40,gateAttack:10,gateHold:100,gateRelease:150,limThresh:-3};
-
-  // Bypass gain: when effect is OFF, gain=1 (passthrough). When ON, gain=1 too but effect is in chain.
-  // Key: all nodes are ALWAYS in the chain. Bypass = set params to "do nothing":
-  //   - EQ: all gains = 0dB (flat, no change)
-  //   - Compressor: threshold=0dB, ratio=1:1, makeup=0dB → no compression
-  //   - Limiter: threshold=0dB, ratio=1:1 → no limiting
-  //   - Gate: threshold=-100dB → nothing gated
-
-  // Noise gate via AudioWorkletNode (replaces deprecated ScriptProcessorNode)
-  let gateNode;
-  try{
-    if(_gateWorkletLoaded) await _gateWorkletLoaded;
-    gateNode=new AudioWorkletNode(ctx,'noise-gate',{
-      numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[2]
-    });
-    gateNode.port.postMessage({
-      enabled: fxState.noiseGate||false,
-      thresh:  fxState.gateThresh||-40,
-      range:   fxState.gateRange||-40,
-      attack:  (fxState.gateAttack||10)/1000,
-      hold:    (fxState.gateHold||100)/1000,
-      release: (fxState.gateRelease||150)/1000,
-    });
-  }catch(e){
-    // Fallback: simple GainNode passthrough if worklet unavailable
-    if(window.__sbDev) console.warn('[Audio] Gate worklet unavailable, using passthrough:',e);
-    gateNode=ctx.createGain();
-    gateNode.gain.value=1;
-  }
-
-  // 3-Band EQ (flat = 0dB gain = passthrough)
-  const eqLow=ctx.createBiquadFilter();
-  eqLow.type='lowshelf'; eqLow.frequency.value=320; eqLow.gain.value=fxState.eq?fxState.eqLow:0;
-  _stereoIfy(eqLow);
-  const eqMid=ctx.createBiquadFilter();
-  eqMid.type='peaking'; eqMid.frequency.value=1000; eqMid.Q.value=1.0; eqMid.gain.value=fxState.eq?fxState.eqMid:0;
-  _stereoIfy(eqMid);
-  const eqHigh=ctx.createBiquadFilter();
-  eqHigh.type='highshelf'; eqHigh.frequency.value=3200; eqHigh.gain.value=fxState.eq?fxState.eqHigh:0;
-  _stereoIfy(eqHigh);
-
-  // Compressor (threshold=0 + ratio=1 + makeup=0 = passthrough)
-  const compressor=ctx.createDynamicsCompressor();
-  compressor.threshold.value=fxState.compressor?fxState.compThresh:0;
-  compressor.ratio.value=fxState.compressor?fxState.compRatio:1;
-  compressor.knee.value=10;
-  compressor.attack.value=0.003;
-  compressor.release.value=0.25;
-  const compMakeup=ctx.createGain();
-  compMakeup.gain.value=fxState.compressor?_dbToLinear(fxState.compGain):1;
-
-  // Limiter (threshold from fxState, ratio=1 = passthrough)
-  const limiter=ctx.createDynamicsCompressor();
-  limiter.threshold.value=fxState.limiter?(fxState.limThresh||-3):0;
-  limiter.ratio.value=fxState.limiter?20:1;
-  limiter.knee.value=0;
-  limiter.attack.value=0.001;
-  limiter.release.value=0.1;
-
-  // RNNoise node (AI denoising) — inserted between gateNode and EQ
-  let rnnoiseNode = null;
-  if (S._rnnoiseEnabled && S._rnnoiseWasmLoaded) {
-    try {
-      if (_rnnoiseWorkletLoaded) await _rnnoiseWorkletLoaded;
-      rnnoiseNode = new AudioWorkletNode(ctx, 'rnnoise-processor', {
-        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2]
-      });
-      rnnoiseNode.port.postMessage({ type: 'init', wasmExports: S._rnnoiseWasm });
-      rnnoiseNode.port.postMessage({ type: 'enable', enabled: true });
-      S._rnnoiseNodes.set(src.id, rnnoiseNode);
-    } catch (e) {
-      if (window.__sbDev) console.warn('[RNNoise] node create failed:', e);
-      rnnoiseNode = null;
-    }
-  }
-
-  // Chain: source → gateNode (AudioWorklet) → [rnnoiseNode?] → eqLow → eqMid → eqHigh → comp → compMakeup → limiter → [output]
-  sourceNode.connect(gateNode);
-  if (rnnoiseNode) {
-    gateNode.connect(rnnoiseNode);
-    rnnoiseNode.connect(eqLow);
-  } else {
-    gateNode.connect(eqLow);
-  }
-  eqLow.connect(eqMid);
-  eqMid.connect(eqHigh);
-  eqHigh.connect(compressor);
-  compressor.connect(compMakeup);
-  compMakeup.connect(limiter);
-
-  // Output split
-  limiter.connect(gainNode);
-  gainNode.connect(S.audioDest);
-  gainNode.connect(analyser);
-  // Desktop audio monitoring is disabled — it would create echo/feedback
-  // since desktop audio IS the system audio playing through speakers
-  if(src.type!=='desktop'){
-    limiter.connect(monitorGain);
-    monitorGain.connect(ctx.destination);
-  }
-
-  S.audioNodes.set(src.id,{sourceNode,gainNode,monitorGain,analyser,
-    effectsChain:{gateNode,eqLow,eqMid,eqHigh,compressor,compMakeup,limiter},
-    rawSource,splitter});
-  S.audioEffects.set(src.id,fxState);
-  src.fxState=fxState;
-  if(window.__sbDev) console.log('[Audio] Connected with FX chain:',src.name);
+  // Remove from localStreams tracking
+  S.wrtc.removeLocalStream(src.stream);
+  if(S._wrtcPrevPerSource) S._wrtcPrevPerSource.delete(src.id);
+  _p2pLog('[P2P] Removed source tracks from peers: '+src.name+' '+src.type);
 }
-
-function _disconnectSource(srcId){
-  const n=S.audioNodes.get(srcId);if(!n)return;
-  try{n.sourceNode.disconnect();}catch(e){}
-  try{n.gainNode.disconnect();}catch(e){}
-  try{n.monitorGain.disconnect();}catch(e){}
-  if(n.effectsChain){
-    try{n.effectsChain.gateNode.disconnect();}catch(e){}
-    try{n.effectsChain.eqLow.disconnect();}catch(e){}
-    try{n.effectsChain.eqMid.disconnect();}catch(e){}
-    try{n.effectsChain.eqHigh.disconnect();}catch(e){}
-    try{n.effectsChain.compressor.disconnect();}catch(e){}
-    try{n.effectsChain.compMakeup.disconnect();}catch(e){}
-    try{n.effectsChain.limiter.disconnect();}catch(e){}
-  }
-  if(n.rawSource) try{n.rawSource.disconnect();}catch(e){}
-  if(n.splitter) try{n.splitter.disconnect();}catch(e){}
-  // Clean up RNNoise node if present
-  const rnNode = S._rnnoiseNodes.get(srcId);
-  if (rnNode) { try{rnNode.disconnect();}catch(e){} S._rnnoiseNodes.delete(srcId); }
-  S.audioNodes.delete(srcId);
-  S.audioEffects.delete(srcId);
-}
-
-function _updateGain(src){
-  const n=S.audioNodes.get(src.id);if(!n||!S.audioCtx)return;
-  n.gainNode.gain.setTargetAtTime(src.muted?0:src.vol,S.audioCtx.currentTime,0.02);
-  n.monitorGain.gain.setTargetAtTime(src.monitor?(src.muted?0:src.vol):0,S.audioCtx.currentTime,0.02);
-}
-
-function _resumeAudioCtx(){
-  if(S.audioCtx&&S.audioCtx.state==='suspended') S.audioCtx.resume();
-}
+async function _connectSource(src){return SBAudio._connectSource(src);}
+function _disconnectSource(srcId){SBAudio._disconnectSource(srcId);}
+function _updateGain(src){SBAudio._updateGain(src);}
+function _resumeAudioCtx(){SBAudio._resumeAudioCtx();}
+function _applyFxState(srcId){SBAudio._applyFxState(srcId);}
+function _loadFxStateForName(name){return SBAudio._loadFxStateForName(name);}
+function _hasFx(srcId){return SBAudio._hasFx(srcId);}
+function _dbToLinear(db){return SBAudio._dbToLinear(db);}
+function _toDb(avgByte){return SBAudio._toDb(avgByte);}
+function _muteAppSounds(){SBAudio._muteAppSounds();}
+function _unmuteAppSounds(){SBAudio._unmuteAppSounds();}
+function updateLevels(){SBAudio.updateLevels();}
+function _ensureLevelsLoop(){SBAudio._ensureLevelsLoop();}
 
 // ═══════════════════════════════════════════════════════════
 //  TRANSFORM MATH (unchanged)
 // ═══════════════════════════════════════════════════════════
 // ─── DIRTY-FLAG & CACHED LOOKUPS ────────────────────────────
-function _markDirty(){S._dirty=true;S._sortedItemsCache=null;S._srcMapCache=null;}
-function _getSortedItems(){
-  if(!S._sortedItemsCache) S._sortedItemsCache=[...S.items].sort((a,b)=>a.z-b.z);
-  return S._sortedItemsCache;
-}
-function _getSrcById(id){
-  if(!S._srcMapCache){S._srcMapCache=new Map();for(const s of S.srcs)S._srcMapCache.set(s.id,s);}
-  return S._srcMapCache.get(id);
-}
+// ─── Scene delegates (→ SBScene module) ───
+// All scene/rendering logic lives in renderer/js/scene.js (window.SBScene).
+// Local wrappers keep existing call-sites working.
+function _markDirty(){SBScene.markDirty();}
+function _getSortedItems(){return SBScene.getSortedItems();}
+function _getSrcById(id){return SBScene.getSrcById(id);}
 
-function rotMat(deg){const r=deg*Math.PI/180,c=Math.cos(r),s=Math.sin(r);return{a:c,b:s,c:-s,d:c};}
-function localToWorld(it,lx,ly){const m=rotMat(it.rot);return{x:it.cx+m.a*lx+m.c*ly,y:it.cy+m.b*lx+m.d*ly};}
-function worldToLocal(it,wx,wy){const m=rotMat(-it.rot);const dx=wx-it.cx,dy=wy-it.cy;return{x:m.a*dx+m.c*dy,y:m.b*dx+m.d*dy};}
-function localHandles(it){const hw=it.w/2,hh=it.h/2;return[{id:'tl',x:-hw,y:-hh},{id:'tr',x:hw,y:-hh},{id:'bl',x:-hw,y:hh},{id:'br',x:hw,y:hh},{id:'tm',x:0,y:-hh},{id:'bm',x:0,y:hh},{id:'ml',x:-hw,y:0},{id:'mr',x:hw,y:0},{id:'rot',x:hw+ROT_OFF,y:0}];}
-function opposite(hid,w,h){const hw=w/2,hh=h/2;const m={tl:{x:hw,y:hh},tr:{x:-hw,y:hh},bl:{x:hw,y:-hh},br:{x:-hw,y:-hh},tm:{x:0,y:hh},bm:{x:0,y:-hh},ml:{x:hw,y:0},mr:{x:-hw,y:0}};return m[hid]||{x:0,y:0};}
-function _enforceCircle(it){const cr=it.crop||{l:0,t:0,r:0,b:0};it.uncropW=it.w/Math.max(.1,1-cr.l-cr.r);it.uncropH=it.h/Math.max(.1,1-cr.t-cr.b);const rm=rotMat(it.rot);it.uncropCx=it.cx-rm.a*(cr.l-cr.r)*it.uncropW/2-rm.c*(cr.t-cr.b)*it.uncropH/2;it.uncropCy=it.cy-rm.b*(cr.l-cr.r)*it.uncropW/2-rm.d*(cr.t-cr.b)*it.uncropH/2;}
-// Extra zoom for circle mask so user can pan in BOTH axes even when video aspect = item aspect
-const CIRCLE_PAN_ZOOM=1.18;
+function rotMat(deg){return SBScene.rotMat(deg);}
+function localToWorld(it,lx,ly){return SBScene.localToWorld(it,lx,ly);}
+function worldToLocal(it,wx,wy){return SBScene.worldToLocal(it,wx,wy);}
+function localHandles(it){return SBScene.localHandles(it);}
+function opposite(hid,w,h){return SBScene.opposite(hid,w,h);}
+function _enforceCircle(it){SBScene.enforceCircle(it);}
+function _snapCircle(it){SBScene.snapCircle(it);}
+const CIRCLE_PAN_ZOOM=SBScene.CIRCLE_PAN_ZOOM;
 
-// ─── UNDO STACK ───────────────────────────────────────────
-// Captures only item geometry/crop/mask state (not the heavy stream/element refs)
-function _snapshotItems(){
-  return S.items.map(it=>({
-    sid:it.sid,cx:it.cx,cy:it.cy,w:it.w,h:it.h,z:it.z,rot:it.rot,
-    flipH:it.flipH,flipV:it.flipV,
-    crop:it.crop?{...it.crop}:{l:0,t:0,r:0,b:0},
-    cropMask:it.cropMask||'none',
-    uncropW:it.uncropW,uncropH:it.uncropH,uncropCx:it.uncropCx,uncropCy:it.uncropCy,
-    panDx:it.panDx||0,panDy:it.panDy||0,
-    frameSettings:it.frameSettings?JSON.parse(JSON.stringify(it.frameSettings)):null,
-  }));
-}
-function _pushUndo(label){
-  try{
-    S._undoStack.push({label:label||'',snap:_snapshotItems(),t:Date.now()});
-    while(S._undoStack.length>S._undoMax) S._undoStack.shift();
-  }catch(e){if(window.__sbDev) console.warn('undo push failed',e);}
-}
+function hitHandle(mx,my,it){return SBScene.hitHandle(mx,my,it);}
+function hitItem(mx,my,it){return SBScene.hitItem(mx,my,it);}
+function cursorFor(hid){return SBScene.cursorFor(hid);}
+function toCanvas(cv,e){return SBScene.toCanvas(cv,e);}
+
+// ─── Undo delegates ───
+function _pushUndo(label){SBScene.pushUndo(label);}
 function _undo(){
-  if(!S._undoStack.length){msg('Нечего отменять','info');return;}
-  const entry=S._undoStack.pop();
-  // Handle source deletion undo
-  if(entry.type==='delete-source'&&entry.restore){
-    const r=entry.restore;
-    _undoRestoreSource(r);
-    msg('Отменено: «'+r.srcName+'» восстановлен','info');
-    return;
-  }
-  // Handle transform/crop/mask undo
-  const map=new Map(entry.snap.map(e=>[e.sid,e]));
-  for(const it of S.items){
-    const e=map.get(it.sid);if(!e) continue;
-    Object.assign(it,{
-      cx:e.cx,cy:e.cy,w:e.w,h:e.h,z:e.z,rot:e.rot,
-      flipH:e.flipH,flipV:e.flipV,
-      crop:{...e.crop},cropMask:e.cropMask,
-      uncropW:e.uncropW,uncropH:e.uncropH,uncropCx:e.uncropCx,uncropCy:e.uncropCy,
-      panDx:e.panDx,panDy:e.panDy,
-      frameSettings:e.frameSettings?JSON.parse(JSON.stringify(e.frameSettings)):it.frameSettings,
-    });
-  }
-  msg('Отменено'+(entry.label?': '+entry.label:''),'info');
-  // Replicate the rolled-back item state to peers so we don't desync
-  if(S.co){
-    for(const it of S.items){ S.co.queueItemUpsert(it); }
-    S.co.flushAllItems();
+  const result=SBScene.undo(msg);
+  if(!result)return;
+  if(result.type==='delete-source'&&result.restore){
+    _undoRestoreSource(result.restore);
+    msg('Отменено: «'+result.restore.srcName+'» восстановлен','info');
+  }else{
+    msg('Отменено'+(result.label?': '+result.label:''),'info');
   }
 }
 
@@ -506,17 +423,18 @@ async function _undoRestoreSource(r){
     msg('Не удалось восстановить источник: '+e.message,'info');
   }
 }
-function _snapCircle(it){if(it.cropMask==='circle'||it.cropMask==='rect'){const s=Math.min(it.w,it.h);it.w=s;it.h=s;_enforceCircle(it);}}
-function hitHandle(mx,my,it){const loc=worldToLocal(it,mx,my);for(const h of localHandles(it)){if(Math.hypot(loc.x-h.x,loc.y-h.y)<HIT_R)return h.id;}return null;}
-function hitItem(mx,my,it){const loc=worldToLocal(it,mx,my);return Math.abs(loc.x)<=it.w/2+6&&Math.abs(loc.y)<=it.h/2+6;}
-function cursorFor(hid){if(hid==='tl'||hid==='tr'||hid==='bl'||hid==='br')return'grab';const m={tm:'ns-resize',bm:'ns-resize',ml:'ew-resize',mr:'ew-resize',rot:'ew-resize'};return m[hid]||'default';}
-function toCanvas(cv,e){const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*(cv.width/r.width),y:(e.clientY-r.top)*(cv.height/r.height)};}
+// (_snapCircle, hitHandle, hitItem, cursorFor, toCanvas are delegates to SBScene — defined above)
 
 // ═══════════════════════════════════════════════════════════
 //  INIT
 // ═══════════════════════════════════════════════════════════
 async function init(){
   if(window.__sbDev) console.log('[Init] StreamBro v12 starting...');
+  SBScene.init(S, D);
+  SBAudio.init(S, D, {_gateWorkletLoaded, _rnnoiseWorkletLoaded, _newSid, _coSafe, _wireTrackEndHandlers, renderMixer, updateE, msg, _scheduleSettingsSave, _coBroadcastSrcUpdateDebounced, _showFxModal});
+  SBSources.init(S);
+  SBUi.init(S, D);
+  SBScene.injectSvgFilters();
   Object.keys({
     sceneCanvas:1,sceneOverlay:1,scenePreview:1,sceneEmpty:1,sourcesList:1,audioMixer:1,
     btnConnectFriend:1,btnAddSource:1,btnMixerAdd:1,mixerAddDropdown:1,
@@ -530,6 +448,8 @@ async function init(){
     turnServerUrl:1,turnServerUser:1,turnServerPass:1,
     roomCodeDisplay:1,roomCode:1,btnCopyCode:1,connectError:1,
     connectedPeersCreate:1,connectedPeersJoin:1,
+    myRoomsList:1,btnLeaveRoomTop:1,
+    roomNameInput:1,btnPasteCode:1,
     addSourceModal:1,btnCloseSourceModal:1,
     addMicModal:1,btnCloseMicModal:1,micSelect:1,btnConfirmMic:1,
     renameModal:1,btnCloseRenameModal:1,renameInput:1,btnConfirmRename:1,
@@ -551,8 +471,8 @@ async function init(){
   // Load persisted settings
   await _loadSettings();
   _applyTheme();
-  // Onboarding wizard — show on first launch
-  if (!S.settings.onboardingComplete) {
+  // Onboarding tour — show on first launch (unless user checked "never show")
+  if (!S.settings.onboardingComplete && !S.settings.onboardingNeverShow) {
     _startOnboarding();
   }
 
@@ -581,6 +501,7 @@ async function init(){
     D.sceneOverlay.height = S.ch;
   }
   initRTMP(); setupScene(); loop(); _syncOverlaySize();
+  _initScenePresets();
   _initHints();
   try{window.electronAPI.startSignalingServer();}catch(e){}
   // Listen for FFmpeg rec stop event
@@ -590,7 +511,71 @@ async function init(){
   });}catch(e){}
   // Listen for Presence WS signal relay (WebRTC)
   try{window.electronAPI.onPresenceSignal(data=>{
+    _p2pLog('[P2P] Presence signal received: '+data.type+' '+data.signal?.type+' from='+data.fromPeerId);
     if(S.wrtc&&S.wrtc.handlePresenceSignal) S.wrtc.handlePresenceSignal(data);
+  });}catch(e){}
+  // Handle Presence WS reconnect — rejoin P2P room if we were in one
+  try{window.electronAPI.onPresenceReconnect(()=>{
+    if(window.__sbDev) console.log('[Presence] Reconnected — checking P2P room');
+    if(S.roomCode&&S.wrtc){
+      // Clean up old PeerConnections (they're dead after network interruption)
+      for(const [pid,pc] of S.wrtc.peers){
+        try{pc.close();}catch(_){}
+      }
+      S.wrtc.peers.clear();
+      // Clean up peer sources
+      S.srcs=S.srcs.filter(s=>{
+        if(s.isPeer){if(s.stream)s.stream.getTracks().forEach(t=>{try{t.stop();}catch(_){}});_disconnectSource(s.id);return false;}
+        return true;
+      });
+      S.items=S.items.filter(x=>S.srcs.some(s=>s.id===x.sid));
+      if(S.co){S.co=null;}
+      S._handledPeerStreams.clear();
+      // Re-join the room via server API, then create PeerConnections
+      S.wrtc._userJoinedRoom=true;
+      S.wrtc.setSignalingChannel((signalMsg)=>{
+        window.electronAPI.presenceSend(JSON.stringify(signalMsg));
+      });
+      window.electronAPI.roomsJoin(S.roomCode).then(r=>{
+        if(!r||!r.ok){
+          _p2pLog('[P2P] WARN: Rejoin failed after reconnect: '+(r?.error||'unknown'));
+          _hideActiveRoom();
+          uRS('offline','Не подключён');
+        }else{
+          _p2pLog('[P2P] Rejoined room after reconnect');
+          const roomData=r.data||{};
+          const peerIds=roomData.members?roomData.members.filter(m=>m.userId!==S.wrtc.myPeerId).map(m=>m.userId):[];
+          for(const pid of peerIds){S.wrtc._createPeerConnection(pid,true);}
+          ensureAudioCtx();_rebuildCombinedStream();
+          _sendSourceStreamsToPeers();
+          if(S.wrtc.onRoomJoined)S.wrtc.onRoomJoined(S.roomCode,S.wrtc.myPeerId,peerIds);
+        }
+      }).catch(e=>{
+        _p2pLog('[P2P] WARN: Rejoin error after reconnect: '+e.message);
+        _hideActiveRoom();
+        uRS('offline','Не подключён');
+      });
+      renderSources();renderMixer();updateE();
+    }
+  });}catch(e){}
+  // Listen for room events (peer-joined, peer-left, invite) via Presence WS
+  try{window.electronAPI.onStreamNotification(data=>{
+    if(!data) return;
+    if(data.type==='room-event'&&data.event==='peer-joined'&&S.wrtc){
+      // Only create PC if we're actually in a room (prevent stale presence reconnects)
+      if(!S.roomCode) return;
+      const pid=data.fromUserId;
+      if(pid&&pid!==S.wrtc.myPeerId){
+        if(!S.wrtc.peers.has(pid)){
+          // Room creator creates PC as joiner (isInitiator=false) — the new
+          // participant (who called joinRoom) is the initiator and will send offer.
+          S.wrtc._createPeerConnection(pid,false);
+          _sendSourceStreamsToPeers();
+        }
+        if(S.co) S.co.setMyPeerId(S.myPeerId);
+        msg('Друг подключился к комнате!','success');
+      }
+    }
   });}catch(e){}
   // Show permanent desktop audio fader
   _showDesktopAudioFader();
@@ -604,6 +589,9 @@ async function init(){
   _initSoundSettingsPane();
   _initUpdatesPane();
   _initBugCapture();
+  _initNetworkMonitor();
+  _initSidebarResize();
+  _initBottomResize();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -629,65 +617,186 @@ async function _loadRNNoise() {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  ONBOARDING WIZARD — shown once on first launch
+//  ONBOARDING TOUR — interactive spotlight guide, shown once
 // ═══════════════════════════════════════════════════════════
 function _startOnboarding() {
   const overlay = document.getElementById('onboardingOverlay');
-  const content = document.getElementById('onboardContent');
-  const nextBtn = document.getElementById('onboardNext');
-  const skipBtn = document.getElementById('onboardSkip');
-  if (!overlay) return;
+  const tooltip = document.getElementById('obTooltip');
+  const arrow   = document.getElementById('obArrow');
+  const stepNum = document.getElementById('obStepNum');
+  const title   = document.getElementById('obTitle');
+  const desc    = document.getElementById('obDesc');
+  const nextBtn = document.getElementById('obNext');
+  const skipBtn = document.getElementById('obSkip');
+  const neverCb = document.getElementById('obNeverCb');
+  if (!overlay || !tooltip) return;
+
+  const ARROW_H = 12;
+  const SPOT_PAD = 10;
+  // One backdrop div with clip-path polygon: cuts a rectangular hole
+  // around the target element. Has backdrop-filter:blur + dark tint.
+  // The target element is never modified (no z-index hacks) — it simply
+  // shows through the clip-path hole, crisp and unblurred.
+  // No stacking-context issues. Tooltip has CSS transition for smooth slide.
 
   const steps = [
     {
-      icon: '🎬',
+      target: null,
       title: 'Добро пожаловать в StreamBro!',
-      desc: 'Простой стриминг и запись для Windows. Давай настроим всё за пару минут.',
-      action: null,
+      desc: 'Простой стриминг и запись для Windows.\nПройдём быстрый тур — за пару кликов.',
     },
     {
-      icon: '📷',
+      target: '#btnAddSource',
       title: 'Добавь источник',
-      desc: 'Нажми «Добавить источник» — камеру, экран или окно. Перетаскивай и изменяй размер прямо на сцене.',
-      action: { label: 'Добавить источник', fn: () => { const btn = document.getElementById('addSrcBtn') || document.querySelector('[data-action="add-src"]'); if (btn) btn.click(); } },
+      desc: 'Нажми сюда, чтобы добавить камеру, экран или окно на сцену.\nПеретаскивай и изменяй размер прямо на холсте.',
     },
     {
-      icon: '🎙️',
-      title: 'Настрой звук',
-      desc: 'Открой микшер, выбери микрофон. Можно добавить шумодав, эквалайзер и компрессор в Audio FX.',
-      action: { label: 'Открыть микшер', fn: () => { const btn = document.getElementById('mixerToggle') || document.querySelector('[data-tab="mixer"]'); if (btn) btn.click(); } },
+      target: '#accPlatforms',
+      title: 'Платформы и ключ стрима',
+      desc: 'Здесь выбираешь Twitch, Kick или YouTube и вставляешь ключ стрима.\nЗатем нажимаешь «Стрим» ниже — и ты в эфире!',
     },
     {
-      icon: '🚀',
-      title: 'Готово к стриму!',
-      desc: 'Укажи ключ стрима в настройках (вкладка «Стрим»). Нажми большую кнопку STREAM — и ты в эфире!',
-      action: { label: 'Открыть настройки', fn: () => { const btn = document.getElementById('settingsToggle') || document.querySelector('[data-action="settings"]'); if (btn) btn.click(); } },
+      target: '#btnMixerAdd',
+      title: 'Микшер звука',
+      desc: 'Нажми + чтобы добавить микрофон.\nКнопка FX — шумодав, эквалайзер, компрессор.',
+    },
+    {
+      target: '#accFriends',
+      title: 'Друзья и поддержка',
+      desc: 'Здесь твои друзья и чат.\nНапиши «StreamBro Поддержка» — AI-бот ответит на любые вопросы о приложении!',
+    },
+    {
+      target: '#btnOpenSettings',
+      title: 'Настройки',
+      desc: 'Темы, производительность, друзья, профиль — всё здесь.',
     },
   ];
 
   let step = 0;
+  let backdrop = null;
+  let _rafId = null;
+
+  function _ensureBackdrop() {
+    if (backdrop) return;
+    backdrop = document.createElement('div');
+    backdrop.id = 'obBackdrop';
+    overlay.insertBefore(backdrop, overlay.firstChild);
+  }
+
+  function _setClip(rect) {
+    if (!backdrop) return;
+    const p = SPOT_PAD;
+    const x = rect.left - p;
+    const y = rect.top - p;
+    const r = rect.right + p;
+    const b = rect.bottom + p;
+    // Outer rect clockwise → move to inner → inner rect clockwise → even-odd fills outside
+    backdrop.style.clipPath =
+      'polygon(0% 0%,100% 0%,100% 100%,0% 100%,0% 0%,' +
+      x + 'px ' + y + 'px,' +
+      x + 'px ' + b + 'px,' +
+      r + 'px ' + b + 'px,' +
+      r + 'px ' + y + 'px,' +
+      x + 'px ' + y + 'px)';
+  }
+
+  function _clearClip() {
+    if (backdrop) backdrop.style.clipPath = 'none';
+  }
+
+  function _positionTooltip(target) {
+    if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
+
+    if (!target) {
+      // Centered welcome — no hole, full backdrop
+      _ensureBackdrop();
+      _clearClip();
+      backdrop.style.display = 'block';
+      tooltip.style.top = '50%';
+      tooltip.style.left = '50%';
+      tooltip.style.transform = 'translate(-50%, -50%)';
+      arrow.style.display = 'none';
+      return;
+    }
+
+    tooltip.style.transform = 'none';
+    arrow.style.display = 'block';
+
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    if (!el) { _positionTooltip(null); return; }
+
+    // Open accordion if target is inside a closed one
+    const accItem = el.closest('.accordion-item');
+    if (accItem && !accItem.classList.contains('open')) {
+      accItem.classList.add('open');
+    }
+
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+
+    // Wait two frames for layout to settle after scroll + accordion
+    _rafId = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        _rafId = null;
+        const r = el.getBoundingClientRect();
+        _ensureBackdrop();
+        backdrop.style.display = 'block';
+        _setClip(r);
+
+        const tw = tooltip.offsetWidth;
+        const th = tooltip.offsetHeight;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const gap = 14;
+
+        const spaceBelow = vh - r.bottom;
+        const spaceAbove = r.top;
+        const placeBelow = spaceBelow >= th + gap + ARROW_H || spaceBelow > spaceAbove;
+
+        let top, left;
+        if (placeBelow) {
+          top = r.bottom + SPOT_PAD + gap;
+        } else {
+          top = r.top - SPOT_PAD - gap - th;
+        }
+        left = r.left + (r.width / 2) - (tw / 2);
+        left = Math.max(12, Math.min(left, vw - tw - 12));
+
+        tooltip.style.top = top + 'px';
+        tooltip.style.left = left + 'px';
+
+        // Arrow
+        const arrowLeft = r.left + (r.width / 2) - left;
+        const clampedArrowLeft = Math.max(16, Math.min(arrowLeft, tw - 16));
+        if (placeBelow) {
+          arrow.style.top = -ARROW_H + 'px';
+          arrow.style.bottom = '';
+          arrow.style.left = clampedArrowLeft + 'px';
+          arrow.className = 'ob-arrow-down';
+        } else {
+          arrow.style.bottom = -ARROW_H + 'px';
+          arrow.style.top = '';
+          arrow.style.left = clampedArrowLeft + 'px';
+          arrow.className = 'ob-arrow-up';
+        }
+      });
+    });
+  }
 
   function renderStep() {
     const s = steps[step];
-    content.innerHTML = `
-      <div class="ob-step-icon">${s.icon}</div>
-      <div class="ob-step-title">${s.title}</div>
-      <p class="ob-step-desc">${s.desc}</p>
-      ${s.action ? `<div class="ob-step-action"><button class="ob-action-btn" id="obActionBtn">${s.action.label}</button></div>` : ''}
-    `;
-    if (s.action) {
-      const ab = document.getElementById('obActionBtn');
-      if (ab) ab.onclick = s.action.fn;
-    }
-    document.querySelectorAll('.ob-dot').forEach((d, i) => {
-      d.classList.toggle('ob-dot-active', i === step);
-    });
-    nextBtn.textContent = step === steps.length - 1 ? 'Начать! ✓' : 'Далее →';
+    stepNum.textContent = (step + 1) + ' / ' + steps.length;
+    title.textContent = s.title;
+    desc.textContent = s.desc;
+    nextBtn.textContent = step === steps.length - 1 ? 'Готово!' : 'Далее →';
+    _positionTooltip(s.target);
   }
 
   function finish() {
+    if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
+    if (backdrop) backdrop.style.display = 'none';
     overlay.style.display = 'none';
     S.settings.onboardingComplete = true;
+    if (neverCb && neverCb.checked) S.settings.onboardingNeverShow = true;
     _scheduleSettingsSave();
   }
 
@@ -697,7 +806,9 @@ function _startOnboarding() {
   };
   skipBtn.onclick = finish;
 
-  overlay.style.display = 'flex';
+  overlay.style.display = 'block';
+  tooltip.style.display = 'block';
+  if(neverCb) neverCb.checked = false;
   renderStep();
 }
 
@@ -736,13 +847,7 @@ async function _loadSettings(){
   }
 }
 
-function _scheduleSettingsSave(){
-  if(S._settingsSaveTimer) clearTimeout(S._settingsSaveTimer);
-  S._settingsSaveTimer=setTimeout(()=>{
-    S._settingsSaveTimer=null;
-    _persistSettings();
-  },400);
-}
+function _scheduleSettingsSave(){SBUi.scheduleSettingsSave(_persistSettings);}
 
 async function _persistSettings(extra){
   if(!S.settings) return;
@@ -769,41 +874,30 @@ async function _persistSettings(extra){
       turnUser:D.turnServerUser?D.turnServerUser.value.trim():'',
       turnPass:D.turnServerPass?D.turnServerPass.value.trim():'',
     },
+    onboardingComplete: !!S.settings.onboardingComplete,
+    onboardingNeverShow: !!S.settings.onboardingNeverShow,
     // 1.1.0 — preserve sound + updates blocks (mutated in place by their UI panes)
     ...(S.settings&&S.settings.sound?{sound:S.settings.sound}:{}),
     ...(S.settings&&S.settings.updates?{updates:S.settings.updates}:{}),
     ...(S.settings&&S.settings.friends?{friends:S.settings.friends}:{}),
+    ...(S.settings&&S.settings.camSettingsByName?{camSettingsByName:S.settings.camSettingsByName}:{}),
+    ...(S.settings&&S.settings.collapsedSections?{collapsedSections:S.settings.collapsedSections}:{}),
+    ...(S.settings&&S.settings.scenePresets?{scenePresets:S.settings.scenePresets}:{}),
+    // P2P room — save roomCode for auto-rejoin after restart
+    p2p:{
+      roomCode:S.roomCode||null,
+    },
     ...(extra||{}),
   };
+  if(window.__sbDev) console.log('[persistSettings] scenePresets count:',(payload.scenePresets||[]).length);
   try{await window.electronAPI.settingsSave(payload);}catch(e){if(window.__sbDev) console.warn('[Settings] Save failed:',e.message);}
 }
 
-function _applyTheme(){
-  const theme=(S.settings&&S.settings.ui&&S.settings.ui.theme)||'dark';
-  let resolved=theme;
-  if(theme==='system'){
-    resolved=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';
-  }
-  document.documentElement.setAttribute('data-theme',resolved);
-  document.documentElement.classList.toggle('reduced-motion',!!S.reducedMotion);
-  // Invalidate theme color caches so canvas redraw picks up new accents
-  S._cachedAccent=null;S._cachedHandleStroke=null;
-}
-
-function _readVar(name){
-  try{
-    const v=getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    return v||null;
-  }catch(e){return null;}
-}
-function _themeAccentCache(){
-  if(!S._cachedAccent) S._cachedAccent=_readVar('--accent')||'#ffd23c';
-  return S._cachedAccent;
-}
-function _themeHandleStrokeCache(){
-  if(!S._cachedHandleStroke) S._cachedHandleStroke=_readVar('--handle-stroke')||'#1a1a2e';
-  return S._cachedHandleStroke;
-}
+function _applyTheme(){SBUi.applyTheme();}
+function _readVar(name){return SBUi.readVar(name);}
+function _themeAccentCache(){return SBUi.themeAccentCache();}
+function _themeHandleStrokeCache(){return SBUi.themeHandleStrokeCache();}
+function esc(s){return SBUi.esc(s);}
 
 async function _autoEnumDevices(){
   try{
@@ -891,13 +985,10 @@ async function _setupWasapiPipeline(fmt){
     }
   }
 
-  // Remove old desktop source if exists
+  // Remove old desktop source if exists (use rmSrc to properly clean up WebRTC tracks + CoScene)
   if(S.desktopAudioId){
-    const oldIdx=S.srcs.findIndex(s=>s.id===S.desktopAudioId);
-    if(oldIdx>=0){
-      _disconnectSource(S.desktopAudioId);
-      S.srcs.splice(oldIdx,1);
-    }
+    try{ rmSrc(S.desktopAudioId,{fromRecreate:true}); }catch(e){}
+    S.desktopAudioId=null;
   }
 
   // Create AudioContext + AudioWorklet for off-thread PCM → MediaStream
@@ -925,18 +1016,14 @@ async function _setupWasapiPipeline(fmt){
 
   const id=_newSid();
   S.desktopAudioId=id;
-  const src={id,gid:id,ownerPeerId:S.myPeerId,name:'Звук рабочего стола',type:'desktop',stream:audioStream,msid:audioStream.id,el:null,visible:true,vol:1,muted:false,isPeer:false,peerId:null,vst:[],monitor:false,fxState:_loadFxStateForName('Звук рабочего стола')};
-  S.srcs.push(src);
-  // Send desktop audio (incl. movie sound) to all peers — needed for movie watching together.
-  if(S.wrtc) S.wrtc.addLocalStreamToAllPeers(audioStream);
-  _coSafe(co=>co.broadcastSourceAdd());
-  console.log('[Audio] Source added: Звук рабочего стола, tracks='+audioStream.getAudioTracks().length);
-  ensureAudioCtx();
-  _resumeAudioCtx();
-  if(audioStream.getAudioTracks().length>0) _connectSource(src);
-  _rebuildCombinedStream();
-  renderMixer();updateE();
-  console.log('[WASAPI] Desktop audio source added, id='+id);
+  // Use addAudioSource to properly wire P2P streaming, CoScene broadcast, and audio chain
+  // (was previously pushed directly to S.srcs which skipped WebRTC addTrack + CoScene src.add)
+  const wasapiSrc=addAudioSource('desktop','Звук рабочего стола',audioStream,false,null,{gid:id,msid:audioStream.id});
+  // Override the desktopAudioId with the actual id returned by addAudioSource
+  S.desktopAudioId=wasapiSrc||id;
+  // WASAPI activation may change peer mic monitor routing (feedback prevention)
+  SBAudio._updatePeerMonitorRouting();
+  console.log('[WASAPI] Desktop audio source added, id='+S.desktopAudioId);
   msg('Звук рабочего стола подключён (WASAPI)','success');
 }
 
@@ -1021,83 +1108,38 @@ function addAudioSource(type,name,stream,isP=false,pid=null,opts){
   const id=opts.gid||_newSid();
   const owner=opts.ownerPeerId|| (isP?pid:S.myPeerId);
   const msid=opts.msid||(stream?stream.id:null);
-  const src={id,gid:id,ownerPeerId:owner,name,type,stream,msid,el:null,visible:true,vol:1,muted:false,isPeer:isP,peerId:pid,vst:[],monitor:false,fxState:_loadFxStateForName(name)};
+  const src={id,gid:id,ownerPeerId:owner,name,type,stream,msid,el:null,visible:true,vol:1,muted:false,isPeer:isP,peerId:pid,vst:[],monitor:isP,fxState:_loadFxStateForName(name)};
   S.srcs.push(src);
   if(window.__sbDev) console.log('[Audio] Source added: '+name+', tracks='+(stream?stream.getAudioTracks().length:0));
+  _p2pLog('[Audio] Source added: '+name+' type='+type+' isPeer='+isP+' tracks='+(stream?stream.getAudioTracks().length:0)+' msid='+(msid||'null'));
   ensureAudioCtx();
   _resumeAudioCtx();
   if(stream&&stream.getAudioTracks().length>0) _connectSource(src);
   _rebuildCombinedStream();
-  // Send local sources to peers (peer-owned audio is NOT relayed back — anti-echo)
-  if(!isP&&S.wrtc&&stream)S.wrtc.addLocalStreamToAllPeers(stream);
+  // (peer-owned audio is NOT relayed back — anti-echo)
   _wireTrackEndHandlers(src);
   renderMixer();updateE();
   if(!isP&&S.co&&!opts.suppressBroadcast) S.co.broadcastSourceAdd(src);
+  // Send this source's original stream to all connected peers
+  // Only queue the stream — don't trigger renegotiate here.
+  // _sendSourceStreamsToPeers() will batch-add all streams when connecting to a room,
+  // and for sources added mid-session, _addSourceToPeers triggers renegotiate.
+  if(!isP&&stream&&stream.getTracks().length&&S.wrtc){
+    if(!S._wrtcPrevPerSource) S._wrtcPrevPerSource=new Map();
+    S._wrtcPrevPerSource.set(id,stream);
+    S.wrtc.localStreams.add(stream);
+    // Only add to existing peers and renegotiate if we're in an active P2P session
+    if(S.wrtc.peers.size>0){
+      _addSourceToPeers(src);
+    }
+    _p2pLog('[P2P] Audio source queued for peers: '+name+' '+type+' msid='+stream.id);
+  }
   return id;
 }
 
-function _loadFxStateForName(name){
-  const def={noiseGate:false,eq:false,compressor:false,limiter:false,eqLow:0,eqMid:0,eqHigh:0,compThresh:-24,compRatio:4,compGain:6,gateThresh:-40,gateRange:-40,gateAttack:10,gateHold:100,gateRelease:150,limThresh:-3};
-  if(S.settings&&S.settings.fxStateByName&&S.settings.fxStateByName[name]){
-    return Object.assign({},def,S.settings.fxStateByName[name]);
-  }
-  return def;
-}
+function _syncOverlaySize(){SBUi.syncOverlaySize();}
 
-// ─── Sync overlay canvas CSS position/size to match sceneCanvas (which uses object-fit:contain) ───
-function _syncOverlaySize(){
-  const cv = D.sceneCanvas;
-  const ov = D.sceneOverlay;
-  if(!cv || !ov) return;
-
-  // sceneCanvas uses object-fit:contain — its bounding rect reflects the "contained" size
-  const r = cv.getBoundingClientRect();
-  const parentR = cv.parentElement.getBoundingClientRect();
-
-  const w = Math.round(r.width);
-  const h = Math.round(r.height);
-  // Offset from parent's top-left
-  const left = Math.round(r.left - parentR.left);
-  const top = Math.round(r.top - parentR.top);
-
-  if(ov._syncW !== w || ov._syncH !== h || ov._syncL !== left || ov._syncT !== top){
-    ov.style.width = w + 'px';
-    ov.style.height = h + 'px';
-    ov.style.left = left + 'px';
-    ov.style.top = top + 'px';
-    ov._syncW = w;
-    ov._syncH = h;
-    ov._syncL = left;
-    ov._syncT = top;
-  }
-}
-
-// ─── Hint tooltips (floating div on body level, not clipped by any parent) ───
-function _initHints(){
-  const bubble=document.createElement('div');
-  bubble.id='hintBubble';
-  document.body.appendChild(bubble);
-  document.addEventListener('mouseover',(e)=>{
-    const el=e.target.closest('.hint-toggle');
-    if(!el){return;}
-    bubble.textContent=el.dataset.hint||'';
-    const r=el.getBoundingClientRect();
-    let left=r.left+r.width/2-110;
-    let top=r.top-8;
-    // Clamp to viewport
-    left=Math.max(4,Math.min(left,window.innerWidth-228));
-    // Position above or below depending on space
-    if(top-120<0){top=r.bottom+8;bubble.style.top=top+'px';}else{bubble.style.top='';}
-    bubble.style.left=left+'px';
-    bubble.style.bottom=(window.innerHeight-r.top+8)+'px';
-    bubble.style.top='';
-    bubble.classList.add('show');
-  });
-  document.addEventListener('mouseout',(e)=>{
-    const el=e.target.closest('.hint-toggle');
-    if(el){bubble.classList.remove('show');}
-  });
-}
+function _initHints(){SBUi.initHints();}
 
 function initRTMP(){
   S.rtmp=new RTMPOutput();S.rtmp.setCanvas(D.sceneCanvas);
@@ -1161,7 +1203,40 @@ function loop(){
       S._lastRenderAt=now;
       // Dirty-flag: skip full render when scene is static (no video sources, not streaming, not dragging)
       const hasVideoSources=S.srcs.some(s=>s.el&&s.el.readyState>=2&&(s.type==='camera'||s.type==='screen'||s.type==='window'||s.type==='peer-video'));
-      if(S._dirty||hasVideoSources||S.streaming||S.drag||S.res||S.rot||S.rotC||S.crop){
+      if(S._dirty||hasVideoSources||S.streaming||S.drag||S.res||S.rot||S.rotC||S.crop||S._sceneTransition){
+        // Process scene transition (fade) before render
+        if(S._sceneTransition){
+          const tr=S._sceneTransition;
+          const elapsed=performance.now()-tr.start;
+          const dur=300;
+          if(tr.phase==='out'){
+            tr.alpha=Math.max(0,1-elapsed/dur);
+            if(tr.alpha<=0){
+              // Fade-out complete → apply preset, then fade in
+              S._sceneTransition={phase:'loading',start:performance.now()};
+              if(tr.targetPreset){
+                _applyScenePreset(tr.targetPreset).then(()=>{
+                  S._sceneTransition={phase:'in',alpha:0,start:performance.now()};
+                  _markDirty();
+                }).catch(e=>{
+                  if(window.__sbDev)console.error('[SceneTransition] apply failed:',e);
+                  S._sceneTransition=null;
+                });
+              }else{
+                S._sceneTransition={phase:'in',alpha:0,start:performance.now()};
+              }
+            }
+          }else if(tr.phase==='in'){
+            tr.alpha=Math.min(1,elapsed/dur);
+            if(tr.alpha>=1) S._sceneTransition=null;
+          }else if(tr.phase==='loading'){
+            // Waiting for _applyScenePreset to resolve — keep rendering black
+            // Timeout after 5s
+            if(elapsed>5000){
+              S._sceneTransition=null;
+            }
+          }
+        }
         try{render();}catch(e){if(window.__sbDev)console.error('[render]',e);}
         S._dirty=false;
       }
@@ -1189,20 +1264,6 @@ function _coTickActiveEdit(){
 //  STREAM STATUS UI
 // ═══════════════════════════════════════════════════════════
 // Mute/unmute app sounds during stream/recording so they don't leak via WASAPI
-let _soundsMutedByStream=false;
-function _muteAppSounds(){
-  if(_soundsMutedByStream) return;
-  _soundsMutedByStream=true;
-  if(window.SBSounds) SBSounds.setEnabled(false);
-}
-function _unmuteAppSounds(){
-  if(!S.streaming && !(S.rtmp&&S.rtmp._recording)){
-    _soundsMutedByStream=false;
-    if(window.SBSounds && S.settings && S.settings.sound && S.settings.sound.enabled!==false){
-      SBSounds.setEnabled(true);
-    }
-  }
-}
 
 function _setStreamStatus(state,reason){
   S.streamStatus=state;  if(!D.btnStartStream)return;
@@ -1253,13 +1314,104 @@ function _wireTrackEndHandlers(src){
   const tracks=src.stream.getTracks();
   for(const t of tracks){
     t.addEventListener('ended',()=>{
-      if(window.__sbDev) console.warn('[Device] Track ended:',src.name,t.kind);
-      // For peers we wait for WebRTC to handle reconnect
-      if(src.isPeer) return;
+      if(window.__sbDev) console.warn('[Device] Track ended:',src.name,t.kind,'isPeer='+src.isPeer);
+      if(src.isPeer){
+        // Peer track ended = friend removed this source → remove it from our list too
+        // Check if ALL tracks in this source's stream have ended
+        const allEnded=src.stream.getTracks().every(tr=>tr.readyState==='ended');
+        if(allEnded){
+          _p2pLog('[P2P] All peer tracks ended, removing source: '+src.name);
+          try{ rmSrc(src.id,{fromRemote:true}); }catch(e){
+            _p2pLog('[P2P] WARN: Failed to remove ended peer source: '+e.message);
+          }
+        }
+        return;
+      }
       // Desktop audio is restarted automatically by WASAPI watcher
       if(src.id===S.desktopAudioId) return;
       msg('Устройство отключено: '+src.name,'error');
       try{rmSrc(src.id);}catch(e){}
+    });
+    // For peer sources: handle track unmute — WebRTC audio tracks can
+    // arrive muted and only produce sound after unmute event.
+    if(src.isPeer){
+      t.addEventListener('unmute',()=>{
+        _p2pLog('[P2P] Track unmuted: '+src.name+' '+t.kind);
+        // Reconnect audio chain to pick up the now-active track
+        if(t.kind==='audio'){
+          try{ _disconnectSource(src.id); _connectSource(src); _rebuildCombinedStream(); }catch(e){
+            _p2pLog('[P2P] WARN: unmute reconnect failed: '+e.message);
+          }
+        }
+        _markDirty();
+      });
+      // Also log mute events for debugging
+      t.addEventListener('mute',()=>{
+        _p2pLog('[P2P] Track muted: '+src.name+' '+t.kind);
+      });
+      // CRITICAL FIX: if the track is ALREADY unmuted when we wire handlers,
+      // the 'unmute' event already fired and we missed it.
+      // This happens when:
+      //   a) Initial connection: ICE connects before CoScene snapshot arrives (0.9s gap)
+      //   b) Re-added sources: ICE already active, unmute fires ~20ms after ontrack
+      //      but grace period is 2.5s → source created way after unmute
+      // In these cases, createMediaStreamSource was called with an "already-unmuted"
+      // track and Chrome's audio pipeline doesn't produce data without reconnect.
+      // Solution: schedule a reconnect after 200ms (after _connectSource finishes async).
+      if(t.kind==='audio' && !t.muted){
+        _p2pLog('[P2P] Track already unmuted at wire time: '+src.name+' - scheduling reconnect');
+        setTimeout(()=>{
+          if(!S.srcs.find(s=>s.id===src.id)) return; // source removed
+          _p2pLog('[P2P] Executing scheduled reconnect for already-unmuted track: '+src.name);
+          try{ _disconnectSource(src.id); _connectSource(src); _rebuildCombinedStream(); }catch(e){
+            _p2pLog('[P2P] WARN: scheduled reconnect failed: '+e.message);
+          }
+        }, 200);
+      }
+    }
+  }
+  // For peer sources: listen for removetrack on the stream (WebRTC fires this
+  // when the remote peer removes a track via removeTrack + renegotiate).
+  // IMPORTANT: do NOT delete the source on removetrack — during renegotiate,
+  // WebRTC may temporarily remove all tracks and then add new ones. Deleting
+  // the source kills the audio chain, and the new onPeerTrack creates a
+  // duplicate source instead of reconnecting. Just mark dirty and let
+  // the next onPeerTrack handle it.
+  if(src.isPeer && src.stream){
+    src.stream.addEventListener('removetrack',(e)=>{
+      _p2pLog('[P2P] removetrack on peer stream: '+src.name+' '+e.track?.kind);
+      // Only delete if the source stream has NO live tracks AND no new
+      // tracks appear within 8 seconds (grace period for renegotiate).
+      const remaining=src.stream.getTracks().filter(tr=>tr.readyState!=='ended');
+      if(remaining.length===0){
+        // Don't delete immediately — renegotiate may add new tracks via onPeerTrack
+        // with a DIFFERENT stream.id (new MediaStream). onPeerTrack creates a fallback
+        // source. So we check: if a new source from the same peer already exists,
+        // we can safely delete this one. Otherwise, wait 8s before deleting.
+        const samePeerSrcs=S.srcs.filter(s=>s.isPeer&&s.peerId===src.peerId&&s.id!==src.id);
+        if(samePeerSrcs.length>0){
+          // New sources from this peer already exist — safe to delete the old one
+          _p2pLog('[P2P] removetrack: peer has other sources, deleting old: '+src.name);
+          try{ rmSrc(src.id,{fromRemote:true}); }catch(e2){}
+        } else {
+          // No new sources yet — wait for renegotiate to deliver them
+          if(src._removetrackTimer) clearTimeout(src._removetrackTimer);
+          src._removetrackTimer=setTimeout(()=>{
+            // Re-check: maybe new sources appeared from this peer
+            const nowAlive=src.stream.getTracks().filter(tr=>tr.readyState!=='ended');
+            const peerHasNew=S.srcs.filter(s=>s.isPeer&&s.peerId===src.peerId&&s.id!==src.id);
+            if(nowAlive.length===0 && peerHasNew.length===0 && S.srcs.some(s=>s.id===src.id)){
+              _p2pLog('[P2P] Grace expired, no new sources from peer, deleting: '+src.name);
+              try{ rmSrc(src.id,{fromRemote:true}); }catch(e2){}
+            } else if(nowAlive.length===0 && S.srcs.some(s=>s.id===src.id)){
+              _p2pLog('[P2P] Grace expired but peer has new sources, deleting old: '+src.name);
+              try{ rmSrc(src.id,{fromRemote:true}); }catch(e2){}
+            }
+          },8000);
+        }
+      }else{
+        _markDirty();
+      }
     });
   }
 }
@@ -1296,6 +1448,9 @@ function bind(){
   if(D.btnOpenHelp) D.btnOpenHelp.onclick=()=>showM('help');
   if(D.btnCloseHelpModal) D.btnCloseHelpModal.onclick=()=>hideM('help');
   if(D.helpModal) D.helpModal.onclick=e=>{if(e.target===D.helpModal)hideM('help');};
+  // Restart onboarding from help modal
+  const btnRestart = document.getElementById('btnRestartOnboarding');
+  if(btnRestart) btnRestart.onclick=()=>{hideM('help');_startOnboarding();};
   D.btnMixerAdd.onclick=e=>{e.stopPropagation();D.mixerAddDropdown.classList.toggle('open');};
   document.addEventListener('click',e=>{if(!D.mixerAddDropdown.contains(e.target)&&e.target!==D.btnMixerAdd)D.mixerAddDropdown.classList.remove('open');});
   D.mixerAddDropdown.querySelectorAll('[data-madd]').forEach(b=>b.onclick=()=>{const t=b.dataset.madd;D.mixerAddDropdown.classList.remove('open');if(t==='mic')showM('addMic');else if(t==='desktop'){if(S.desktopAudioId&&S.srcs.find(s=>s.id===S.desktopAudioId)){msg('Звук рабочего стола уже подключён','info');}else{captureDesktopAudio();}}});
@@ -1325,7 +1480,21 @@ function bind(){
   D.btnCreateRoom.onclick=createRoom;
   D.btnJoinRoom.onclick=joinRoom;
   D.btnCopyCode.onclick=copyCode;
-  document.querySelectorAll('.tab-btn').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab-btn').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab-content').forEach(x=>x.classList.remove('active'));b.classList.add('active');const id='tab'+b.dataset.tab.charAt(0).toUpperCase()+b.dataset.tab.slice(1);const el=$(id);if(el)el.classList.add('active');});
+  if(D.btnLeaveRoomTop)D.btnLeaveRoomTop.onclick=leaveCurrentRoom;
+  const expBtn=document.getElementById('btnExportP2pLog');
+  if(expBtn) expBtn.onclick=_exportP2pLog;
+  if(D.btnPasteCode)D.btnPasteCode.onclick=async()=>{
+    try{const t=await navigator.clipboard.readText();if(t){D.joinRoomCode.value=t;D.joinRoomCode.dispatchEvent(new Event('input'));}}catch{};
+  };
+  document.querySelectorAll('#connectModal .tab-btn').forEach(b=>b.onclick=()=>{
+    document.querySelectorAll('#connectModal .tab-btn').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('#connectModal .tab-content').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    const tabMap={create:'tabCreate',join:'tabJoin',myrooms:'tabMyRooms'};
+    const id=tabMap[b.dataset.tab]||('tab'+b.dataset.tab.charAt(0).toUpperCase()+b.dataset.tab.slice(1));
+    const el=$(id);if(el)el.classList.add('active');
+    if(b.dataset.tab==='myrooms') loadMyRooms();
+  });
   D.btnCloseSourceModal.onclick=()=>hideM('addSource');
   document.querySelectorAll('.source-type-btn').forEach(b=>b.onclick=()=>pickType(b.dataset.source));
   D.btnConfirmSource.onclick=confirmAdd;
@@ -1430,7 +1599,7 @@ function bind(){
   }
 }
 
-function rebuildZ(){S.items.forEach(it=>{const idx=S.srcs.findIndex(s=>s.id===it.sid);if(idx>=0)it.z=S.srcs.length-idx;});_markDirty();}
+function rebuildZ(){SBSources.rebuildZ();_markDirty();}
 
 // ═══════════════════════════════════════════════════════════
 //  SCENE INTERACTION (unchanged)
@@ -1512,7 +1681,7 @@ function setupScene(){
   };
   cv.onmouseup=endI;
   document.addEventListener('mouseup',e=>{if(S.drag||S.res||S.rot||S.rotC||S.crop)endI();});
-  document.addEventListener('mousemove',e=>{if(!S.drag&&!S.res&&!S.rot&&!S.rotC&&!S.crop)return;const{x:mx,y:my}=toCanvas(cv,e);const cw=S.cw,ch=S.ch;if(S.drag){const it=S.items.find(s=>s.sid===S.drag.sid);if(!it)return;if(S.drag.panCrop){const rmI=rotMat(-it.rot);const ddx=mx-S.drag.startMx,ddy=my-S.drag.startMy;const lx=rmI.a*ddx+rmI.c*ddy,ly=rmI.b*ddx+rmI.d*ddy;let px=S.drag.startPanDx+lx,py=S.drag.startPanDy+ly;const cr=it.crop||{l:0,t:0,r:0,b:0};const hasMask=it.cropMask&&it.cropMask!=='none';if(hasMask){
+  document.addEventListener('mousemove',e=>{if(!S.drag&&!S.res&&!S.rot&&!S.rotC&&!S.crop)return;const{x:mx,y:my}=toCanvas(cv,e);const cw=S.cw,ch=S.ch;if(S.drag){const it=S.items.find(s=>s.sid===S.drag.sid);if(!it)return;const cr=it.crop||{l:0,t:0,r:0,b:0};if(S.drag.panCrop){const rmI=rotMat(-it.rot);const ddx=mx-S.drag.startMx,ddy=my-S.drag.startMy;const lx=rmI.a*ddx+rmI.c*ddy,ly=rmI.b*ddx+rmI.d*ddy;let px=S.drag.startPanDx+lx,py=S.drag.startPanDy+ly;const hasMask=it.cropMask&&it.cropMask!=='none';if(hasMask){
         // For masked sources we use COVER scaling × CIRCLE_PAN_ZOOM — gives wiggle room on BOTH axes
         const _src=S.srcs.find(s=>s.id===it.sid);
         const sw=Math.max(1,_src&&_src.el?(_src.el.videoWidth*(1-cr.l-cr.r)):it.w);
@@ -1673,574 +1842,24 @@ function _resetTransform(it){
 // ═══════════════════════════════════════════════════════════
 //  RENDER
 // ═══════════════════════════════════════════════════════════
-function render(){
-  S.frameAnimTime=performance.now()/1000;
-  const cw=S.cw,ch=S.ch;
-
-  // ─── WebGL path ───
-  if(S._useGL && S.gl && S.gl.ready){
-    _renderGL(cw, ch);
-    _renderOverlay(cw, ch);
-    if(S.streaming&&S.rtmp)D.streamUptime.textContent=S.rtmp.getUptime();
-    return;
-  }
-
-  // ─── Canvas 2D fallback path ───
-  const c=S.ctx;if(!c)return;
-  c.clearRect(0,0,cw,ch);
-  for(const it of _getSortedItems()){
-    const src=_getSrcById(it.sid);if(!src||!src.visible||!src.el)continue;const v=src.el;if(v.readyState<2)continue;const cr=it.crop||{l:0,t:0,r:0,b:0};
-    try{
-    c.save();c.translate(it.cx,it.cy);c.rotate(it.rot*Math.PI/180);c.scale(it.flipH?-1:1,it.flipV?-1:1);
-    _drawBorderGlowOut(c,it);
-    const maskType=it.cropMask||'none';
-    if(maskType==='circle'){
-      const cr_=Math.min(it.w,it.h)/2;
-      c.beginPath();c.arc(0,0,cr_,0,Math.PI*2);c.clip();
-    }else if(maskType==='rounded'){
-      const r=Math.min(it.w,it.h)*0.15;
-      _roundedRectPath(c,-it.w/2,-it.h/2,it.w,it.h,r);c.clip();
-    }else if(maskType==='rect'){
-      c.beginPath();c.rect(-it.w/2,-it.h/2,it.w,it.h);c.clip();
-    }
-    const cs=src.camSettings;
-    const hasCamFx=cs&&(cs.brightness!==0||cs.contrast!==0||cs.saturation!==0||(cs.temperature&&cs.temperature!==6500)||(cs.sharpness&&cs.sharpness>0)||(cs.hue&&cs.hue!==0)||(cs.sepia&&cs.sepia!==0));
-    if(hasCamFx){
-      const fs=[];
-      if(cs.brightness!==0) fs.push('brightness('+(1+cs.brightness/100)+')');
-      if(cs.contrast!==0) fs.push('contrast('+(1+cs.contrast/100)+')');
-      if(cs.saturation!==0) fs.push('saturate('+(1+cs.saturation/100)+')');
-      if(cs.temperature&&cs.temperature!==6500){
-        const shift=(cs.temperature-6500)/2500;
-        if(shift>0) fs.push('sepia('+Math.min(shift*0.5,0.6)+') saturate('+(1+shift*0.15)+')');
-        else fs.push('hue-rotate('+(shift*15)+'deg) saturate('+(1+Math.abs(shift)*0.1)+')');
-      }
-      if(cs.sharpness&&cs.sharpness>0) fs.push('contrast('+(1+cs.sharpness*0.003)+')');
-      if(cs.hue&&cs.hue!==0) fs.push('hue-rotate('+cs.hue+'deg)');
-      if(cs.sepia&&cs.sepia!==0) fs.push('sepia('+(cs.sepia/100)+')');
-      if(fs.length) c.filter=fs.join(' ');
-    }
-    const sx=cr.l*v.videoWidth,sy=cr.t*v.videoHeight;
-    const pdx=it.panDx||0,pdy=it.panDy||0;
-    const sw=Math.max(1,v.videoWidth*(1-cr.l-cr.r)),sh=Math.max(1,v.videoHeight*(1-cr.t-cr.b));
-    try{
-      if(it.cropMask==='circle'||it.cropMask==='rect'||it.cropMask==='rounded'){
-        const cs=Math.max(it.w/sw,it.h/sh)*CIRCLE_PAN_ZOOM;
-        const dw=sw*cs,dh=sh*cs;
-        c.drawImage(v,sx-pdx*(sw/dw),sy-pdy*(sh/dh),sw,sh,-dw/2,-dh/2,dw,dh);
-      }else{
-        const scX=sw/it.w,scY=sh/it.h;
-        c.drawImage(v,sx-pdx*scX,sy-pdy*scY,sw,sh,-it.w/2,-it.h/2,it.w,it.h);
-      }
-    }catch(e){}
-    if(hasCamFx) c.filter='none';
-    _drawBorder(c,it);
-    c.restore();
-    }catch(e){try{c.restore();}catch(e2){}}
-  }
-  if(S.streaming&&S.rtmp)D.streamUptime.textContent=S.rtmp.getUptime();
-  _renderOverlay(cw, ch);
-}
-
-// ─── WebGL render path ───
-function _renderGL(cw, ch){
-  const gl = S.gl;
-  if(!gl || !gl.ready) return;
-  gl.beginFrame();
-
-  for(const it of _getSortedItems()){
-    const src=_getSrcById(it.sid);
-    if(!src||!src.visible||!src.el) continue;
-    const v=src.el;
-    if(v.readyState<2) continue;
-    const cr=it.crop||{l:0,t:0,r:0,b:0};
-    const fs=it.frameSettings;
-
-    // Draw outward glow (GPU blur)
-    if(fs && fs.glow && fs.glow.enabled && fs.glow.outward){
-      const glowSize = Math.max(2, fs.glow.size || 15);
-      let glowColor = fs.glow.color || fs.color || '#ffd23c';
-      let opacity = fs.opacity || 1.0;
-      const animType = S.reducedMotion ? 'none' : (fs.animation || 'none');
-      const animI = fs.animIntensity !== undefined ? fs.animIntensity : 1.0;
-      const t = S.frameAnimTime || 0;
-      if(animType==='breathe') opacity = fs.opacity * (Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
-      else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;glowColor=_hslToHex(hsl.h,hsl.s,hsl.l);}
-      else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;glowColor=_hslToHex(h2.h,90,55);}
-      opacity=Math.max(0,Math.min(1,opacity));
-      gl.drawGlowOut(it, fs, glowColor, glowSize, opacity, 0);
-    }
-
-    // Draw video source as textured quad
-    gl.drawSource(src.id, v, it, cr);
-
-    // Draw inward glow (GPU blur — rendered after video so it overlays inside)
-    if(fs && fs.glow && fs.glow.enabled && fs.glow.inward){
-      const glowSize = Math.max(2, fs.glow.size || 15);
-      let glowColor = fs.glow.color || fs.color || '#ffd23c';
-      let opacity = fs.opacity || 1.0;
-      const animType = S.reducedMotion ? 'none' : (fs.animation || 'none');
-      const animI = fs.animIntensity !== undefined ? fs.animIntensity : 1.0;
-      const t = S.frameAnimTime || 0;
-      if(animType==='breathe') opacity = fs.opacity * (Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
-      else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;glowColor=_hslToHex(hsl.h,hsl.s,hsl.l);}
-      else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;glowColor=_hslToHex(h2.h,90,55);}
-      opacity=Math.max(0,Math.min(1,opacity));
-      gl.drawGlowOut(it, fs, glowColor, glowSize, opacity * 0.8, 1);
-    }
-
-    // Draw vignette
-    if(fs && fs.vignette && fs.vignette.enabled){
-      gl.drawVignette(it, fs.vignetteColor || '#000000', fs.vignette.strength, fs.vignette.size);
-    }
-
-    // Draw border stroke
-    if(fs && fs.enabled){
-      let thickness = fs.thickness, opacity = fs.opacity, color = fs.color;
-      let animType = S.reducedMotion ? 'none' : (fs.animation || 'none');
-      const animI = fs.animIntensity !== undefined ? fs.animIntensity : 1.0;
-      const t = S.frameAnimTime || 0;
-      if(animType==='pulse') thickness=fs.thickness*(1+0.5*animI*Math.sin(t*3));
-      else if(animType==='breathe') opacity=fs.opacity*(Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
-      else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;color=_hslToHex(hsl.h,hsl.s,hsl.l);}
-      else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;color=_hslToHex(h2.h,90,55);}
-      thickness=Math.max(1,thickness);opacity=Math.max(0,Math.min(1,opacity));
-
-      const style = fs.style || 'solid';
-      if(style === 'glow'){
-        // Glow style uses blur — outward only for border style
-        gl.drawGlowOut(it, fs, color, thickness * 3, opacity * 0.5, 0);
-      } else {
-        gl.drawBorderStroke(it, color, thickness, opacity, style);
-      }
-    }
-  }
-}
-
-// ─── Overlay render (handles, grid, safe-areas) — drawn on separate overlayCanvas, NOT captured by captureStream() ───
-function _renderOverlay(cw, ch){
-  const oc = S.overlayCtx;
-  if(!oc) return;
-  oc.clearRect(0, 0, cw, ch);
-
-  // Thin decorative scene border
-  oc.strokeStyle='rgba(255,210,60,.12)';oc.lineWidth=4;oc.strokeRect(2,2,cw-4,ch-4);
-
-  // Grid
-  if(S.showGrid){
-    oc.save();
-    oc.strokeStyle='rgba(255,210,60,.35)';
-    oc.lineWidth=4;
-    oc.shadowColor='rgba(255,210,60,.45)';oc.shadowBlur=10;
-    oc.beginPath();
-    for(let i=1;i<3;i++){
-      oc.moveTo((cw/3)*i,0);oc.lineTo((cw/3)*i,ch);
-      oc.moveTo(0,(ch/3)*i);oc.lineTo(cw,(ch/3)*i);
-    }
-    oc.stroke();
-    oc.shadowBlur=0;
-    oc.strokeStyle='rgba(255,255,255,.55)';
-    oc.lineWidth=1.5;
-    oc.setLineDash([10,6]);
-    oc.beginPath();
-    for(let i=1;i<3;i++){
-      oc.moveTo((cw/3)*i,0);oc.lineTo((cw/3)*i,ch);
-      oc.moveTo(0,(ch/3)*i);oc.lineTo(cw,(ch/3)*i);
-    }
-    oc.stroke();
-    oc.setLineDash([]);
-    oc.strokeStyle='rgba(255,210,60,.7)';
-    oc.lineWidth=1.5;
-    const cs=14;
-    oc.beginPath();
-    oc.moveTo(cw/2-cs,ch/2);oc.lineTo(cw/2+cs,ch/2);
-    oc.moveTo(cw/2,ch/2-cs);oc.lineTo(cw/2,ch/2+cs);
-    oc.stroke();
-    oc.restore();
-  }
-
-  // Safe areas
-  if(S.showSafeAreas){
-    oc.save();
-    oc.strokeStyle='rgba(255,210,60,.35)';
-    oc.lineWidth=2;
-    oc.setLineDash([8,8]);
-    const o5=Math.min(cw,ch)*0.05;
-    const o10=Math.min(cw,ch)*0.10;
-    oc.strokeRect(o5,o5,cw-o5*2,ch-o5*2);
-    oc.strokeStyle='rgba(231,76,60,.35)';
-    oc.strokeRect(o10,o10,cw-o10*2,ch-o10*2);
-    oc.setLineDash([]);
-    oc.restore();
-  }
-
-  // Selection handles (on top of everything)
-  for(const it of _getSortedItems()){
-    if(S.selItem!==it.sid) continue;
-    const src=_getSrcById(it.sid);
-    if(!src) continue;
-    oc.save();oc.translate(it.cx,it.cy);oc.rotate(it.rot*Math.PI/180);
-    const accent=(_themeAccentCache())||'#ffd23c';
-    const handleStroke=(_themeHandleStrokeCache())||'#1a1a2e';
-    const isLocked=src.locked;
-    oc.shadowColor=accent;oc.shadowBlur=isLocked?0:8;
-    oc.strokeStyle=isLocked?'#f0a030':accent;oc.lineWidth=3;
-    oc.strokeRect(-it.w/2,-it.h/2,it.w,it.h);
-    oc.shadowBlur=0;
-    if(!isLocked){
-      oc.fillStyle=accent;
-      const hw=it.w/2,hh=it.h/2;
-      for(const p of[{x:-hw,y:-hh},{x:hw,y:-hh},{x:-hw,y:hh},{x:hw,y:hh},{x:0,y:-hh},{x:0,y:hh},{x:-hw,y:0},{x:hw,y:0}]){
-        oc.beginPath();oc.arc(p.x,p.y,HANDLE_R,0,Math.PI*2);oc.fill();
-        oc.strokeStyle=handleStroke;oc.lineWidth=2;oc.stroke();
-      }
-      oc.beginPath();oc.moveTo(hw+4,0);oc.lineTo(hw+ROT_OFF-HANDLE_R,0);
-      oc.strokeStyle=accent;oc.lineWidth=2;oc.stroke();
-      oc.beginPath();oc.arc(hw+ROT_OFF,0,HANDLE_R+2,0,Math.PI*2);oc.fillStyle=accent;oc.fill();
-      oc.strokeStyle=handleStroke;oc.lineWidth=2;oc.stroke();
-    }else{
-      const hw=it.w/2,hh=it.h/2;
-      oc.fillStyle='rgba(240,160,48,.92)';
-      oc.beginPath();oc.arc(hw-12,-hh+12,10,0,Math.PI*2);oc.fill();
-      oc.strokeStyle='#1a1a2e';oc.lineWidth=1;oc.stroke();
-      oc.fillStyle='#1a1a2e';oc.font='bold 11px Segoe UI';oc.textAlign='center';oc.textBaseline='middle';
-      oc.fillText('🔒',hw-12,-hh+12);
-    }
-    oc.restore();
-  }
-}
-
-function _roundedRectPath(c,x,y,w,h,r){
-  r=Math.min(r,w/2,h/2);
-  c.beginPath();
-  c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.arcTo(x+w,y,x+w,y+r,r);
-  c.lineTo(x+w,y+h-r);c.arcTo(x+w,y+h,x+w-r,y+h,r);
-  c.lineTo(x+r,y+h);c.arcTo(x,y+h,x,y+h-r,r);
-  c.lineTo(x,y+r);c.arcTo(x,y,x+r,y,r);
-  c.closePath();
-}
-
-function _drawBorderGlowOut(c,it){
-  const fs=it.frameSettings;
-  if(!fs) return;
-  if(!fs.glow||!fs.glow.enabled||!fs.glow.outward) return;
-  const hw=it.w/2,hh=it.h/2;
-  const maskType=it.cropMask||'none';
-  const isRound=maskType==='circle';
-  const isRounded=maskType==='rounded';
-  const rr=isRounded?Math.min(it.w,it.h)*0.15:0;
-  const t=S.frameAnimTime||0;
-  let color=fs.color,glowColor=fs.glow.color,thickness=fs.thickness,opacity=fs.opacity;
-  const animType=S.reducedMotion?'none':(fs.animation||'none');
-  const animI=fs.animIntensity!==undefined?fs.animIntensity:1.0;
-  if(animType==='pulse') thickness=fs.thickness*(1+0.5*animI*Math.sin(t*3));
-  else if(animType==='breathe') opacity=fs.opacity*(Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
-  else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;color=_hslToHex(hsl.h,hsl.s,hsl.l);if(fs.glow.color===fs.color)glowColor=color;}
-  else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;color=_hslToHex(h2.h,90,55);glowColor=color;}
-  thickness=Math.max(1,thickness);opacity=Math.max(0,Math.min(1,opacity));
-  const glowSize=Math.max(2,fs.glow.size||15);
-
-  // Adaptive reach: halo SHOULD NOT extend further than free space around the item, otherwise we
-  // see a sharp clipping at the canvas border ("обрезанные границы"). Auto-limit by available room.
-  // Skip auto-limit for preview-mode items (cx/cy ≈ 0) so design preview shows full halo.
-  let reach=glowSize*1.6;
-  const isPreview=it._isPreview||(Math.abs(it.cx||0)<1&&Math.abs(it.cy||0)<1);
-  if(!isPreview){
-    const sceneMaxX=Math.max(20,Math.min(it.cx,Math.max(20,(S.cw||1920)-it.cx))-Math.max(hw,hh));
-    const sceneMaxY=Math.max(20,Math.min(it.cy,Math.max(20,(S.ch||1080)-it.cy))-Math.max(hw,hh));
-    const sceneRoom=Math.max(20,Math.min(sceneMaxX,sceneMaxY));
-    reach=Math.min(reach,sceneRoom);
-  }
-
-  // Helper: stroke the path that matches the crop shape (so glow follows the actual outline)
-  function strokeShape(){
-    if(isRound){c.beginPath();c.arc(0,0,Math.min(hw,hh),0,Math.PI*2);c.stroke();}
-    else if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);c.stroke();}
-    else c.strokeRect(-hw,-hh,it.w,it.h);
-  }
-
-  if(isRound){
-    // ── Круг — мягкий радиальный halo с расширенным fadeout для дифузии.
-    c.save();
-    const baseR=Math.min(hw,hh);
-    // Старт градиента почти от края, очень мягкий «hot-spot» и длинный шлейф.
-    const innerR=baseR*0.985;
-    const outerR=baseR+reach*1.10;
-    const grd=c.createRadialGradient(0,0,innerR,0,0,outerR);
-    // НИЗКИЕ значения альфы и многоступенчатый fade — не «ореол», а «дымка».
-    grd.addColorStop(0.00,_hexToRGBA(glowColor,opacity*0.55));
-    grd.addColorStop(0.10,_hexToRGBA(glowColor,opacity*0.38));
-    grd.addColorStop(0.28,_hexToRGBA(glowColor,opacity*0.20));
-    grd.addColorStop(0.55,_hexToRGBA(glowColor,opacity*0.08));
-    grd.addColorStop(0.82,_hexToRGBA(glowColor,opacity*0.025));
-    grd.addColorStop(1.00,_hexToRGBA(glowColor,0));
-    c.fillStyle=grd;
-    const M=Math.max(hw,hh),pad=reach*1.2+thickness*2+40;
-    c.fillRect(-M-pad,-M-pad,(M+pad)*2,(M+pad)*2);
-    // Вычистить пиксели внутри маски — halo только снаружи.
-    c.globalCompositeOperation='destination-out';
-    c.beginPath();c.arc(0,0,baseR,0,Math.PI*2);c.fill();
-    c.restore();
-  }else{
-    // ── SHAPE-AWARE HALO для rect / rounded / none — мягче и диффузнее.
-    // Reduced motion: 2 passes instead of 6 (saves ~60% CPU on glow rendering)
-    const baseW=Math.max(thickness*1.0, reach*0.08);
-    const passes=S.reducedMotion?[
-      {blur:reach*0.35, lw:baseW+reach*0.40, alpha:0.18},
-      {blur:reach*0.08, lw:baseW+reach*0.08, alpha:0.35},
-    ]:[
-      {blur:reach*1.05, lw:baseW+reach*1.30, alpha:0.04},
-      {blur:reach*0.80, lw:baseW+reach*0.95, alpha:0.07},
-      {blur:reach*0.55, lw:baseW+reach*0.65, alpha:0.11},
-      {blur:reach*0.35, lw:baseW+reach*0.40, alpha:0.16},
-      {blur:reach*0.18, lw:baseW+reach*0.20, alpha:0.22},
-      {blur:reach*0.06, lw:baseW+reach*0.06, alpha:0.30},
-    ];
-    for(const p of passes){
-      c.save();
-      c.filter='blur('+Math.max(0,p.blur).toFixed(1)+'px)';
-      c.strokeStyle=glowColor;
-      c.lineWidth=Math.max(1,p.lw);
-      c.globalAlpha=opacity*p.alpha;
-      c.lineJoin='round';c.lineCap='round';
-      strokeShape();
-      c.filter='none';
-      c.restore();
-    }
-    // Вычистить halo внутри маски — оставляем только наружный «свет».
-    c.save();
-    c.globalCompositeOperation='destination-out';
-    c.fillStyle='#000';
-    if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);c.fill();}
-    else c.fillRect(-hw,-hh,it.w,it.h);
-    c.restore();
-  }
-}
-
-function _drawBorder(c,it){
-  const fs=it.frameSettings;
-  const hw=it.w/2, hh=it.h/2;
-  const maskType=it.cropMask||'none';
-  const isRound=maskType==='circle';
-  const isRounded=maskType==='rounded';
-  const rr=isRounded?Math.min(it.w,it.h)*0.15:0;
-  const t=S.frameAnimTime||0;
-
-  // Helper: stroke the outline path matching the crop shape
-  function strokeOutline(){
-    if(isRound){c.beginPath();c.arc(0,0,Math.min(hw,hh),0,Math.PI*2);c.stroke();}
-    else if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);c.stroke();}
-    else c.strokeRect(-hw,-hh,it.w,it.h);
-  }
-
-  // ─── VIGNETTE (затемнение по краям) ───
-  if(fs&&fs.vignette&&fs.vignette.enabled){
-    c.save();c.globalAlpha=fs.vignette.strength;
-    const vSize=fs.vignette.size/100;
-    const innerR=Math.max(0,Math.min(hw,hh)*(1-vSize)),outerR=Math.max(1,Math.min(hw,hh));
-    if(outerR>innerR){
-    const grd=c.createRadialGradient(0,0,innerR,0,0,outerR);
-    grd.addColorStop(0,'rgba(0,0,0,0)');
-    const vc=_hexToRGBA(fs.vignetteColor||'#000000',0.95);
-    grd.addColorStop(1,vc);
-    c.fillStyle=grd;_borderPath(c,hw,hh,it.w,it.h,isRound,isRounded,rr);c.fill();}
-    c.restore();
-  }
-
-  // ─── FRAME BORDER (stroke) — only if enabled AND not hidden ───
-  if(!fs||!fs.enabled) return;
-
-  let thickness=fs.thickness,opacity=fs.opacity,color=fs.color;
-  let animType=S.reducedMotion?'none':(fs.animation||'none');
-  let glowColor=fs.glow?fs.glow.color:color;
-  let glowSize=fs.glow?fs.glow.size:0;
-
-  const animI=fs.animIntensity!==undefined?fs.animIntensity:1.0;
-  if(animType==='pulse') thickness=fs.thickness*(1+0.5*animI*Math.sin(t*3));
-  else if(animType==='breathe') opacity=fs.opacity*(Math.max(0,1-0.7*animI)+0.7*animI*(0.5+0.5*Math.sin(t*2)));
-  else if(animType==='colorShift'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+t*60*animI)%360;color=_hslToHex(hsl.h,hsl.s,hsl.l);if(fs.glow&&fs.glow.enabled&&fs.glow.color===fs.color)glowColor=color;}
-  else if(animType==='rainbow'){const h2=_hexToHSL('#ff0000');h2.h=(h2.h+t*120*animI)%360;color=_hslToHex(h2.h,90,55);glowColor=color;}
-  else if(animType==='shimmer'){opacity=fs.opacity*(0.55+0.45*animI*Math.sin(t*8));glowSize=glowSize*(1+0.6*animI*Math.sin(t*6));}
-  else if(animType==='flow'){const hsl=_hexToHSL(fs.color);hsl.h=(hsl.h+Math.sin(t*1.5)*60*animI)%360;color=_hslToHex(hsl.h,hsl.s,hsl.l);glowColor=color;}
-
-  thickness=Math.max(1,thickness);opacity=Math.max(0,Math.min(1,opacity));
-
-  function strokeMask(){
-    if(isRound){c.beginPath();c.ellipse(0,0,hw,hh,0,0,Math.PI*2);c.stroke();}
-    else if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);c.stroke();}
-    else c.strokeRect(-hw,-hh,it.w,it.h);
-  }
-  function pathMaskInset(ins){
-    if(isRound){c.beginPath();c.ellipse(0,0,Math.max(1,hw-ins),Math.max(1,hh-ins),0,0,Math.PI*2);}
-    else if(isRounded){_roundedRectPath(c,-hw+ins,-hh+ins,it.w-ins*2,it.h-ins*2,Math.max(0,rr-ins));}
-    else{c.beginPath();c.rect(-hw+ins,-hh+ins,it.w-ins*2,it.h-ins*2);}
-  }
-
-  c.save();c.globalAlpha=opacity;
-
-  // Inward glow — мягкая «дымка», переходящая в едва заметный rim, без резкого ореола.
-  if(fs.glow&&fs.glow.enabled&&fs.glow.inward&&glowSize>0){
-    if(isRound){
-      // Circle: radial gradient works naturally
-      c.save();
-      c.globalCompositeOperation='source-over';
-      const innerR=Math.max(1,Math.min(hw,hh)-glowSize*1.8);
-      const outerR=Math.max(innerR+1,Math.min(hw,hh)*1.02);
-      const innerGrd=c.createRadialGradient(0,0,innerR,0,0,outerR);
-      innerGrd.addColorStop(0.00,_hexToRGBA(glowColor,0));
-      innerGrd.addColorStop(0.45,_hexToRGBA(glowColor,opacity*0.06));
-      innerGrd.addColorStop(0.72,_hexToRGBA(glowColor,opacity*0.16));
-      innerGrd.addColorStop(0.90,_hexToRGBA(glowColor,opacity*0.32));
-      innerGrd.addColorStop(1.00,_hexToRGBA(glowColor,opacity*0.48));
-      c.fillStyle=innerGrd;
-      c.beginPath();c.arc(0,0,Math.min(hw,hh),0,Math.PI*2);c.fill();
-      c.restore();
-    } else {
-      // Rect/rounded: inset box-shadow using 4 linear gradients from edges
-      // This creates a smooth, non-blocky inward glow that follows the rectangle shape.
-      c.save();
-      // Clip to the source shape so glow stays inside
-      if(isRounded){_roundedRectPath(c,-hw,-hh,it.w,it.h,rr);}
-      else{c.beginPath();c.rect(-hw,-hh,it.w,it.h);}
-      c.clip();
-      const gDist=Math.min(glowSize*1.8, Math.min(hw,hh)*0.8);
-      const gAlpha=opacity*0.45;
-      // Top edge gradient
-      const gT=c.createLinearGradient(0,-hh,0,-hh+gDist);
-      gT.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
-      gT.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
-      gT.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
-      gT.addColorStop(1,_hexToRGBA(glowColor,0));
-      c.fillStyle=gT;c.fillRect(-hw,-hh,it.w,gDist);
-      // Bottom edge gradient
-      const gB=c.createLinearGradient(0,hh,0,hh-gDist);
-      gB.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
-      gB.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
-      gB.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
-      gB.addColorStop(1,_hexToRGBA(glowColor,0));
-      c.fillStyle=gB;c.fillRect(-hw,hh-gDist,it.w,gDist);
-      // Left edge gradient
-      const gL=c.createLinearGradient(-hw,0,-hw+gDist,0);
-      gL.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
-      gL.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
-      gL.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
-      gL.addColorStop(1,_hexToRGBA(glowColor,0));
-      c.fillStyle=gL;c.fillRect(-hw,-hh,gDist,it.h);
-      // Right edge gradient
-      const gR=c.createLinearGradient(hw,0,hw-gDist,0);
-      gR.addColorStop(0,_hexToRGBA(glowColor,gAlpha));
-      gR.addColorStop(0.3,_hexToRGBA(glowColor,gAlpha*0.5));
-      gR.addColorStop(0.7,_hexToRGBA(glowColor,gAlpha*0.12));
-      gR.addColorStop(1,_hexToRGBA(glowColor,0));
-      c.fillStyle=gR;c.fillRect(hw-gDist,-hh,gDist,it.h);
-      c.restore();
-    }
-  }
-
-  const style=fs.style||'solid';
-  if(style==='solid'){c.strokeStyle=color;c.lineWidth=thickness;c.setLineDash([]);strokeMask();}
-  else if(style==='double'){const gap=Math.max(2,thickness*0.4);c.strokeStyle=color;c.lineWidth=thickness*0.6;c.setLineDash([]);strokeMask();const inset=thickness*0.3+gap;pathMaskInset(inset);c.stroke();}
-  else if(style==='dashed'){c.strokeStyle=color;c.lineWidth=thickness;c.setLineDash([thickness*3,thickness*2]);strokeMask();c.setLineDash([]);}
-  else if(style==='dotted'){c.strokeStyle=color;c.lineWidth=thickness;c.setLineDash([thickness*0.5,thickness*1.5]);c.lineCap='round';strokeMask();c.setLineDash([]);c.lineCap='butt';}
-  else if(style==='ornate'){
-    const gap=Math.max(2,thickness*0.35);c.strokeStyle=color;c.lineWidth=thickness*0.55;c.setLineDash([]);strokeMask();
-    const inset=thickness*0.25+gap;pathMaskInset(inset);c.stroke();
-    const dSize=thickness*0.8;c.fillStyle=color;
-    if(isRound){for(let i=0;i<8;i++){const ang=i*Math.PI/4;c.save();c.translate(Math.cos(ang)*hw,Math.sin(ang)*hh);c.rotate(ang+Math.PI/4);c.fillRect(-dSize/2,-dSize/2,dSize,dSize);c.restore();}}
-    else if(isRounded){[{x:-hw+rr,y:-hh+rr},{x:hw-rr,y:-hh+rr},{x:hw-rr,y:hh-rr},{x:-hw+rr,y:hh-rr}].forEach(p=>{c.save();c.translate(p.x,p.y);c.rotate(Math.PI/4);c.fillRect(-dSize/2,-dSize/2,dSize,dSize);c.restore();});}
-    else{[{x:-hw,y:-hh},{x:hw,y:-hh},{x:-hw,y:hh},{x:hw,y:hh}].forEach(p=>{c.save();c.translate(p.x,p.y);c.rotate(Math.PI/4);c.fillRect(-dSize/2,-dSize/2,dSize,dSize);c.restore();});}
-  }
-  else if(style==='gradient'){
-    const g1=fs.gradientColor1||color,g2=fs.gradientColor2||_hslToHex((_hexToHSL(color).h+120)%360,_hexToHSL(color).s,_hexToHSL(color).l),g3=fs.gradientColor3||g1;
-    const grad=c.createLinearGradient(-hw,-hh,hw,hh);const gOff=animType==='flow'?(t*0.3)%1:0;
-    grad.addColorStop(0,g1);grad.addColorStop(Math.min(0.5,0.33+gOff*0.34),g2);grad.addColorStop(1,g3);
-    c.strokeStyle=grad;c.lineWidth=thickness;c.setLineDash([]);strokeMask();
-  }
-  else if(style==='ridge'){c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.max(0,_hexToHSL(color).l-25));c.lineWidth=thickness;c.setLineDash([]);strokeMask();c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.min(100,_hexToHSL(color).l+25));c.lineWidth=thickness*0.35;pathMaskInset(thickness*0.35);c.stroke();}
-  else if(style==='inset'){c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.min(100,_hexToHSL(color).l+20));c.lineWidth=thickness*0.5;c.setLineDash([]);strokeMask();c.strokeStyle=_hslToHex(_hexToHSL(color).h,_hexToHSL(color).s,Math.max(0,_hexToHSL(color).l-20));c.lineWidth=thickness*0.5;pathMaskInset(thickness*0.5);c.stroke();}
-  else if(style==='glow'){(S.reducedMotion?[{blur:thickness,alpha:0.5},{blur:thickness*0.4,alpha:0.8}]:[{blur:thickness*3,alpha:0.1},{blur:thickness*2,alpha:0.2},{blur:thickness,alpha:0.4},{blur:thickness*0.4,alpha:0.7}]).forEach(l=>{c.save();c.shadowColor=color;c.shadowBlur=l.blur;c.strokeStyle=color;c.lineWidth=thickness*0.3;c.globalAlpha=opacity*l.alpha;strokeMask();c.shadowBlur=0;c.restore();});}
-
-  if(animType==='flow'&&style!=='gradient'){c.save();c.globalAlpha=opacity*0.6;c.strokeStyle=color;c.lineWidth=thickness*0.6;c.setLineDash([thickness*4,thickness*8]);c.lineDashOffset=-t*80;strokeMask();c.setLineDash([]);c.restore();}
-
-  if(animType==='shimmer'){
-    c.save();const seed=Math.floor(t*8);
-    let pm;if(isRound)pm=2*Math.PI*Math.max(hw,hh);else pm=2*(it.w+it.h);
-    for(let i=0;i<16;i++){
-      const hash=((seed*31+i*17)%1000)/1000,pos=hash*pm;let sx,sy;
-      if(isRound){const ang=pos/Math.max(hw,hh);sx=Math.cos(ang)*hw;sy=Math.sin(ang)*hh;}
-      else{if(pos<it.w){sx=-hw+pos;sy=-hh;}else if(pos<it.w+it.h){sx=hw;sy=-hh+(pos-it.w);}else if(pos<2*it.w+it.h){sx=hw-(pos-it.w-it.h);sy=hh;}else{sx=-hw;sy=hh-(pos-2*it.w-it.h);}}
-      const br=0.5+0.5*Math.sin(t*12+i*2.5);
-      if(br>0.5){c.fillStyle=color;c.globalAlpha=opacity*br;const sz=Math.max(2,thickness*0.5);c.save();c.translate(sx,sy);c.rotate(t*2+i);c.beginPath();for(let p=0;p<4;p++){const a=p*Math.PI/2;c.lineTo(Math.cos(a)*sz,Math.sin(a)*sz);c.lineTo(Math.cos(a+Math.PI/4)*sz*0.3,Math.sin(a+Math.PI/4)*sz*0.3);}c.closePath();c.fill();c.restore();}
-    }
-    c.restore();
-  }
-  c.restore();
-}
-
-function _borderPath(c,hw,hh,w,h,isRound,isRounded,rr){
-  if(isRound){c.beginPath();c.ellipse(0,0,hw,hh,0,0,Math.PI*2);}
-  else if(isRounded){_roundedRectPath(c,-hw,-hh,w,h,rr);}
-  else{c.beginPath();c.rect(-hw,-hh,w,h);}
-}
-
-function _hexToRGBA(hex,alpha){
-  const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
-  return 'rgba('+r+','+g+','+b+','+alpha+')';
-}
-
-// Color utility functions for animation
-function _hexToHSL(hex){
-  let r=parseInt(hex.slice(1,3),16)/255;
-  let g=parseInt(hex.slice(3,5),16)/255;
-  let b=parseInt(hex.slice(5,7),16)/255;
-  const max=Math.max(r,g,b),min=Math.min(r,g,b);
-  let h,s,l=(max+min)/2;
-  if(max===min){h=s=0;}else{
-    const d=max-min;
-    s=l>0.5?d/(2-max-min):d/(max+min);
-    switch(max){
-      case r:h=((g-b)/d+(g<b?6:0))/6;break;
-      case g:h=((b-r)/d+2)/6;break;
-      case b:h=((r-g)/d+4)/6;break;
-    }
-  }
-  return{h:h*360,s:s*100,l:l*100};
-}
-function _hslToHex(h,s,l){
-  h/=360;s/=100;l/=100;
-  let r,g,b;
-  if(s===0){r=g=b=l;}else{
-    const hue2rgb=(p,q,t)=>{if(t<0)t+=1;if(t>1)t-=1;if(t<1/6)return p+(q-p)*6*t;if(t<1/2)return q;if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;};
-    const q=l<0.5?l*(1+s):l+s-l*s;
-    const p=2*l-q;
-    r=hue2rgb(p,q,h+1/3);
-    g=hue2rgb(p,q,h);
-    b=hue2rgb(p,q,h-1/3);
-  }
-  const toHex=v=>{const hx=Math.round(Math.min(255,Math.max(0,v*255))).toString(16);return hx.length===1?'0'+hx:hx;};
-  return'#'+toHex(r)+toHex(g)+toHex(b);
-}
+//  RENDER — delegates to SBScene
+// ═══════════════════════════════════════════════════════════
+function render(){SBScene.render();}
+function _renderOverlay(cw,ch){SBScene.renderOverlay(cw,ch);}
+function _drawBorderGlowOut(c,it){SBScene.drawBorderGlowOut(c,it);}
+function _drawBorder(c,it){SBScene.drawBorder(c,it);}
+function _roundedRectPath(c,x,y,w,h,r){SBScene.roundedRectPath(c,x,y,w,h,r);}
+function _borderPath(c,hw,hh,w,h,isRound,isRounded,rr){SBScene.borderPath(c,hw,hh,w,h,isRound,isRounded,rr);}
+function _hexToRGBA(hex,alpha){return SBScene.hexToRGBA(hex,alpha);}
+function _hexToHSL(hex){return SBScene.hexToHSL(hex);}
+function _hslToHex(h,s,l){return SBScene.hslToHex(h,s,l);}
 
 // ═══════════════════════════════════════════════════════════
 //  MODALS
 // ═══════════════════════════════════════════════════════════
 let curType=null,curDevs=[],curMicDevs=[];
-function showM(n){
-  if(n==='connect')D.connectModal.style.display='flex';
-  if(n==='addSource'){D.addSourceModal.style.display='flex';D.deviceSelector.style.display='none';curType=null;}
-  if(n==='addMic'){D.addMicModal.style.display='flex';loadMicList();}
-  if(n==='rename')D.renameModal.style.display='flex';
-  if(n==='settings'&&D.settingsModal){_populateSettingsModal();D.settingsModal.style.display='flex';}
-  if(n==='help'&&D.helpModal){D.helpModal.style.display='flex';}
-}
-function hideM(n){
-  if(n==='connect')D.connectModal.style.display='none';
-  if(n==='addSource')D.addSourceModal.style.display='none';
-  if(n==='addMic')D.addMicModal.style.display='none';
-  if(n==='rename')D.renameModal.style.display='none';
-  if(n==='settings'&&D.settingsModal)D.settingsModal.style.display='none';
-  if(n==='help'&&D.helpModal)D.helpModal.style.display='none';
-}
+function showM(n){SBUi.showM(n,{curType,loadMicList,populateSettings:_populateSettingsModal});}
+function hideM(n){SBUi.hideM(n);}
 
 async function _populateSettingsModal(){
   if(!S.settings) await _loadSettings();
@@ -2534,84 +2153,352 @@ function addVideoSource(type,name,stream,isP=false,pid=null,opts){
   const id=opts.gid||_newSid();
   const owner=opts.ownerPeerId|| (isP?pid:S.myPeerId);
   const msid=opts.msid||(stream?stream.id:null);
-  const src={id,gid:id,ownerPeerId:owner,name,type,stream,msid,el:null,visible:true,locked:false,vol:1,muted:false,isPeer:isP,peerId:pid,vst:[],monitor:false,camSettings:{brightness:0,contrast:0,saturation:0,temperature:6500,sharpness:0,hue:0,sepia:0,autoFocus:true,resolution:''},fxState:_loadFxStateForName(name)};
+  const _savedCam=(S.settings&&S.settings.camSettingsByName&&S.settings.camSettingsByName[name])||{};
+  const src={id,gid:id,ownerPeerId:owner,name,type,stream,msid,el:null,visible:true,locked:false,vol:1,muted:false,isPeer:isP,peerId:pid,vst:[],monitor:false,camSettings:Object.assign({},SBSources.defaultCamSettings(),_savedCam),fxState:_loadFxStateForName(name)};
   if(stream&&stream.getVideoTracks().length){const v=document.createElement('video');v.srcObject=stream;v.muted=true;v.playsInline=true;v.play().catch(()=>{});src.el=v;}
-  // New sources go after locked sources (= locked stay on top)
-  if(!isP){
-    const lastLockedIdx=S.srcs.findLastIndex(s=>s.locked);
-    if(lastLockedIdx>=0){
-      S.srcs.splice(lastLockedIdx+1,0,src);
-    }else{
-      S.srcs.unshift(src);
-    }
-  } else { S.srcs.push(src); }
+  SBSources.insertSource(src,isP);
+  _p2pLog('[Video] Source added: '+name+' type='+type+' isPeer='+isP+' tracks='+(stream?stream.getVideoTracks().length:0)+' msid='+(msid||'null'));
   if(src.el) addScene(src,!opts.suppressBroadcast); // create item; broadcast unless we're applying a remote op
-  if(!isP&&S.wrtc&&stream) S.wrtc.addLocalStreamToAllPeers(stream);
   _wireTrackEndHandlers(src);
   rebuildZ();renderSources();updateE();_markDirty();
   if(!isP&&S.co&&!opts.suppressBroadcast) S.co.broadcastSourceAdd(src);
+  // Send this source's original stream to all connected peers
+  // Only queue the stream — don't trigger renegotiate here.
+  // _sendSourceStreamsToPeers() will batch-add all streams when connecting to a room,
+  // and for sources added mid-session, _addSourceToPeers triggers renegotiate.
+  if(!isP&&stream&&stream.getTracks().length&&S.wrtc){
+    if(!S._wrtcPrevPerSource) S._wrtcPrevPerSource=new Map();
+    S._wrtcPrevPerSource.set(id,stream);
+    S.wrtc.localStreams.add(stream);
+    // Only add to existing peers and renegotiate if we're in an active P2P session
+    if(S.wrtc.peers.size>0){
+      _addSourceToPeers(src);
+    }
+    _p2pLog('[P2P] Video source queued for peers: '+name+' '+type+' msid='+stream.id);
+  }
   return id;
 }
 
-function rmSrc(sid){
+async function _changeCamResolution(src,w,h,fps){
+  try{
+    const oldTrack=src.stream&&src.stream.getVideoTracks()[0];
+    if(!oldTrack) return;
+    const oldSettings=oldTrack.getSettings()||{};
+    const deviceId=oldSettings.deviceId;
+    try{oldTrack.stop();}catch(_){}
+    try{src.stream.removeTrack(oldTrack);}catch(_){}
+    const targetFps=fps>0?fps:30;
+    const constraints={audio:false,video:{frameRate:{ideal:targetFps,min:10}}};
+    if(deviceId) constraints.video.deviceId={exact:deviceId};
+    if(w>0&&h>0){constraints.video.width={ideal:w};constraints.video.height={ideal:h};}
+    const ns=await navigator.mediaDevices.getUserMedia(constraints);
+    const nt=ns.getVideoTracks()[0];
+    if(!nt){msg('Не удалось переключить параметры камеры','error');return;}
+    ns.removeTrack(nt);
+    src.stream.addTrack(nt);
+    ns.getTracks().forEach(t=>{try{t.stop();}catch(_){}});
+    if(src.el){
+      src.el.srcObject=src.stream;
+      try{await src.el.play();}catch(_){}
+    }
+    src._offCv=null;
+    const infoEl=document.getElementById('camTrackInfo');
+    if(infoEl){
+      const ns2=nt.getSettings()||{};
+      infoEl.textContent='Камера: '+(ns2.width||'?')+'x'+(ns2.height||'?')+' @ '+Math.round(ns2.frameRate||0)+' fps';
+    }
+    const desc=[];
+    if(w&&h) desc.push(w+'x'+h);
+    if(fps>0) desc.push(fps+' fps');
+    msg('Камера: '+(desc.length?desc.join(', '):'авто'),'success');
+  }catch(e){
+    msg('Не удалось применить параметры камеры: '+(e.message||e),'error');
+  }
+}
+
+// ─── Scene Presets: serialize / load ───
+
+function _serializeScene(name){
+  const srcs=S.srcs.map(s=>{
+    const vt=s.stream?s.stream.getVideoTracks()[0]:null;
+    const at=s.stream?s.stream.getAudioTracks()[0]:null;
+    const vs=vt?vt.getSettings():{};
+    const as_=at?at.getSettings():{};
+    return {
+      type:s.type, name:s.name, gid:s.gid,
+      vol:s.vol, muted:s.muted, visible:s.visible, locked:s.locked,
+      monitor:s.monitor, channelMode:s.channelMode||'auto',
+      fxState:s.fxState?{...s.fxState}:null,
+      camSettings:s.camSettings?{...s.camSettings}:null,
+      deviceId:vs.deviceId||null,
+      audioDeviceId:as_.deviceId||null,
+      deviceIdLabel:vs.deviceId?null:null, // will fill below
+      isPeer:s.isPeer||false, peerId:s.peerId||null,
+    };
+  });
+  // Try to get device labels for better restoration
+  srcs.forEach(s=>{
+    if(s.deviceId){
+      const dev=S._lastDeviceList?S._lastDeviceList.find(d=>d.deviceId===s.deviceId):null;
+      if(dev) s.deviceIdLabel=dev.label||null;
+    }
+    if(s.audioDeviceId){
+      const dev=S._lastAudioDeviceList?S._lastAudioDeviceList.find(d=>d.deviceId===s.audioDeviceId):null;
+      if(dev) s.audioDeviceIdLabel=dev.label||null;
+    }
+  });
+  const items=S.items.map(it=>{
+    const src=S.srcs.find(s=>s.id===it.sid);
+    return {
+      srcName:src?src.name:null,
+      cx:it.cx, cy:it.cy, w:it.w, h:it.h,
+      rot:it.rot, flipH:it.flipH, flipV:it.flipV, z:it.z,
+      crop:{...it.crop}, cropMask:it.cropMask||'none',
+      frameSettings:it.frameSettings?JSON.parse(JSON.stringify(it.frameSettings)):null,
+      uncropW:it.uncropW, uncropH:it.uncropH, uncropCx:it.uncropCx, uncropCy:it.uncropCy,
+      panDx:it.panDx||0, panDy:it.panDy||0,
+    };
+  });
+  return {
+    name,
+    version:2,
+    srcs,
+    items,
+    canvasW:S.cw, canvasH:S.ch,
+    createdAt:Date.now(),
+  };
+}
+
+async function _loadScenePreset(preset){
+  if(!preset||!preset.srcs){if(window.__sbDev)console.log('[ScenePreset] _loadScenePreset: invalid preset');return;}
+  if(window.__sbDev) console.log('[ScenePreset] _loadScenePreset: starting fade-out, srcs:',preset.srcs.length,'items:',preset.items.length);
+  // Fade out current scene
+  S._sceneTransition={phase:'out',alpha:1,targetPreset:preset,start:performance.now()};
+  _markDirty();
+}
+
+async function _applyScenePreset(preset){
+  if(window.__sbDev) console.log('[ScenePreset] _applyScenePreset starting, preset srcs:',preset.srcs.length,'items:',preset.items.length);
+  // Build name→itemData lookup
+  const itemMap=new Map();
+  for(const itData of (preset.items||[])){
+    if(itData.srcName) itemMap.set(itData.srcName,itData);
+  }
+  // Build name→srcData lookup from preset
+  const srcDataMap=new Map();
+  for(const sData of preset.srcs){
+    if(!sData.isPeer && sData.name) srcDataMap.set(sData.name,sData);
+  }
+  // 1) Remove sources NOT in preset (that aren't peer-owned)
+  const toRemove=S.srcs.filter(s=>!s.isPeer && !srcDataMap.has(s.name));
+  for(const s of toRemove) rmSrc(s.id);
+  // 2) For sources that already exist — just update settings + item position
+  //    For sources that don't exist yet — create them
+  for(const sData of preset.srcs){
+    if(sData.isPeer) continue;
+    const existing=S.srcs.find(s=>s.name===sData.name&&!s.isPeer&&s.type===sData.type);
+    if(existing){
+      // Source already exists — update its settings
+      if(sData.vol!==undefined) existing.vol=sData.vol;
+      if(sData.muted!==undefined) existing.muted=sData.muted;
+      if(sData.visible!==undefined) existing.visible=sData.visible;
+      if(sData.locked!==undefined) existing.locked=sData.locked;
+      if(sData.fxState){existing.fxState={...sData.fxState};S.audioEffects.set(existing.id,{...sData.fxState});}
+      if(sData.camSettings){existing.camSettings={...sData.camSettings};}
+      if(sData.channelMode) existing.channelMode=sData.channelMode;
+      if(existing.fxState) SBAudio._applyFxState(existing.id);
+      // Update existing item position
+      const itData=itemMap.get(sData.name);
+      const item=S.items.find(i=>i.sid===existing.id);
+      if(item&&itData){
+        item.cx=itData.cx;item.cy=itData.cy;
+        item.w=itData.w;item.h=itData.h;
+        item.rot=itData.rot||0;item.flipH=itData.flipH||false;item.flipV=itData.flipV||false;
+        if(itData.crop) item.crop={...itData.crop};
+        if(itData.cropMask) item.cropMask=itData.cropMask;
+        if(itData.frameSettings) item.frameSettings=itData.frameSettings;
+        item.uncropW=itData.uncropW||itData.w;
+        item.uncropH=itData.uncropH||itData.h;
+        item.uncropCx=itData.uncropCx||itData.cx;
+        item.uncropCy=itData.uncropCy||itData.cy;
+        item.panDx=itData.panDx||0;
+        item.panDy=itData.panDy||0;
+      }
+    }else{
+      // Source doesn't exist — create it
+      let newSrcId=null;
+      if(sData.type==='desktop'){
+        try{
+          const ds=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
+          newSrcId=addVideoSource(sData.type,sData.name||'Desktop',ds,null,false,null);
+        }catch(e){if(window.__sbDev)console.warn('[ScenePreset] desktop capture failed:',e);}
+      }else if(sData.type==='camera'){
+        try{
+          const constraints={video:true,audio:false};
+          if(sData.deviceId) constraints.video={deviceId:{ideal:sData.deviceId}};
+          else if(sData.camSettings&&sData.camSettings.resolution){
+            const [w,h]=sData.camSettings.resolution.split('x').map(Number);
+            if(w&&h) constraints.video={width:{ideal:w},height:{ideal:h}};
+          }
+          const ms=await navigator.mediaDevices.getUserMedia(constraints);
+          newSrcId=addVideoSource('camera',sData.name||'Camera',ms,null,false,null);
+        }catch(e){msg('Камера '+(sData.name||'Camera')+' не найдена','error');}
+      }else if(sData.type==='image'){
+        newSrcId=addVideoSource('image',sData.name||'Image',null,null,false,null);
+      }else if(sData.type==='mic'){
+        try{
+          const constraints={audio:true};
+          if(sData.audioDeviceId) constraints.audio={deviceId:{ideal:sData.audioDeviceId}};
+          const ms=await navigator.mediaDevices.getUserMedia(constraints);
+          newSrcId=addAudioSource('mic',sData.name||'Микрофон',ms);
+        }catch(e){msg('Микрофон '+(sData.name||'Микрофон')+' не найден','error');}
+      }
+      // Apply settings + item position for new source
+      if(newSrcId){
+        const src=S.srcs.find(s=>s.id===newSrcId);
+        if(src){
+          if(sData.vol!==undefined) src.vol=sData.vol;
+          if(sData.muted!==undefined) src.muted=sData.muted;
+          if(sData.visible!==undefined) src.visible=sData.visible;
+          if(sData.locked!==undefined) src.locked=sData.locked;
+          if(sData.fxState){src.fxState={...sData.fxState};S.audioEffects.set(src.id,{...sData.fxState});}
+          if(sData.camSettings){src.camSettings={...sData.camSettings};}
+          if(sData.channelMode) src.channelMode=sData.channelMode;
+          if(src.fxState) SBAudio._applyFxState(src.id);
+        }
+        const itData=itemMap.get(sData.name);
+        const item=S.items.find(i=>i.sid===newSrcId);
+        if(item&&itData){
+          item.cx=itData.cx;item.cy=itData.cy;
+          item.w=itData.w;item.h=itData.h;
+          item.rot=itData.rot||0;item.flipH=itData.flipH||false;item.flipV=itData.flipV||false;
+          if(itData.crop) item.crop={...itData.crop};
+          if(itData.cropMask) item.cropMask=itData.cropMask;
+          if(itData.frameSettings) item.frameSettings=itData.frameSettings;
+          item.uncropW=itData.uncropW||itData.w;
+          item.uncropH=itData.uncropH||itData.h;
+          item.uncropCx=itData.uncropCx||itData.cx;
+          item.uncropCy=itData.uncropCy||itData.cy;
+          item.panDx=itData.panDx||0;
+          item.panDy=itData.panDy||0;
+        }
+      }
+    }
+  }
+  rebuildZ();
+  _markDirty();
+  renderSources();
+  renderMixer();
+  updateE();
+  _coSafe(co=>co.broadcastSourceUpdate());
+}
+
+function _saveScenePreset(name){
+  const preset=_serializeScene(name);
+  if(window.__sbDev) console.log('[ScenePreset] Saving:',name,'srcs:',preset.srcs.length,'items:',preset.items.length);
+  if(!S.settings.scenePresets) S.settings.scenePresets=[];
+  // Update if exists, else add
+  const idx=S.settings.scenePresets.findIndex(p=>p.name===name);
+  if(idx>=0) S.settings.scenePresets[idx]=preset;
+  else S.settings.scenePresets.push(preset);
+  if(window.__sbDev) console.log('[ScenePreset] Saved, total:',S.settings.scenePresets.length,'calling _scheduleSettingsSave');
+  _scheduleSettingsSave();
+  _renderScenePresetsList();
+  msg('Сцена «'+name+'» сохранена','success');
+}
+
+function _deleteScenePreset(name){
+  if(!S.settings.scenePresets) return;
+  S.settings.scenePresets=S.settings.scenePresets.filter(p=>p.name!==name);
+  _scheduleSettingsSave();
+  _renderScenePresetsList();
+}
+
+function _initScenePresets(){
+  const saveBtn=document.getElementById('scenePresetSaveBtn');
+  const nameInput=document.getElementById('scenePresetNameInput');
+  if(window.__sbDev) console.log('[ScenePresets] Init: saveBtn=',!!saveBtn,'nameInput=',!!nameInput);
+  // Save button (icon in header)
+  if(saveBtn){
+    saveBtn.onclick=()=>{
+      if(window.__sbDev) console.log('[ScenePresets] Save button clicked!');
+      let name=nameInput&&nameInput.value.trim();
+      if(!name){
+        const num=(S.settings.scenePresets||[]).length+1;
+        name='Сцена '+num;
+      }
+      _saveScenePreset(name);
+      if(nameInput) nameInput.value='';
+    };
+  }
+  if(nameInput){
+    nameInput.onkeydown=(e)=>{if(e.key==='Enter'&&saveBtn)saveBtn.click();};
+  }
+  _renderScenePresetsList();
+}
+
+function _renderScenePresetsList(){
+  const list=document.getElementById('scenePresetsList');
+  if(!list) return;
+  const presets=S.settings.scenePresets||[];
+  if(!presets.length){
+    list.innerHTML='<div style="font-size:10px;color:var(--muted);padding:4px">Нет сохранённых сцен</div>';
+    return;
+  }
+  list.innerHTML=presets.map(p=>`
+    <div class="scene-preset-item" data-scene="${esc(p.name)}">
+      <span class="scene-preset-name">${esc(p.name)}</span>
+      <button class="scene-preset-load" title="Загрузить" data-load="${esc(p.name)}">▸</button>
+      <button class="scene-preset-del" title="Удалить" data-del="${esc(p.name)}">✕</button>
+    </div>
+  `).join('');
+  // Wire handlers
+  list.querySelectorAll('.scene-preset-load').forEach(btn=>{
+    btn.onclick=(e)=>{e.stopPropagation();const n=btn.dataset.load;const p=S.settings.scenePresets.find(p=>p.name===n);if(p)_loadScenePreset(p);};
+  });
+  list.querySelectorAll('.scene-preset-del').forEach(btn=>{
+    btn.onclick=(e)=>{e.stopPropagation();_deleteScenePreset(btn.dataset.del);};
+  });
+  list.querySelectorAll('.scene-preset-item').forEach(el=>{
+    el.onclick=()=>{const n=el.dataset.scene;const p=S.settings.scenePresets.find(p=>p.name===n);if(p)_loadScenePreset(p);};
+  });
+}
+
+function rmSrc(sid,opts){
+  opts=opts||{};
   const i=S.srcs.findIndex(s=>s.id===sid);if(i===-1)return;const s=S.srcs[i];
   _disconnectSource(sid);
   // Clean up GL texture for this source
   if(S._useGL && S.gl) S.gl.removeSource(sid);
   // Save source data for Ctrl+Z restore before stopping tracks
   const savedItem=S.items.find(x=>x.sid===sid);
-  const restoreData={
-    type:'delete-source',
-    srcId:s.id,
-    srcType:s.type,
-    srcName:s.name,
-    srcIsPeer:s.isPeer||false,
-    srcPeerId:s.peerId||null,
-    srcVol:s.vol,
-    srcMuted:s.muted,
-    srcVisible:s.visible,
-    srcLocked:s.locked,
-    srcCamSettings:s.camSettings?{...s.camCamSettings}:null,
-    // Device info for re-acquiring the stream
-    deviceId:s.stream&&s.stream.getVideoTracks().length?s.stream.getVideoTracks()[0].getSettings().deviceId:null,
-    audioDeviceId:s.stream&&s.stream.getAudioTracks().length?s.stream.getAudioTracks()[0].getSettings().deviceId:null,
-    // Saved item layout for undo
-    item:savedItem?{
-      cx:savedItem.cx,cy:savedItem.cy,w:savedItem.w,h:savedItem.h,z:savedItem.z,
-      rot:savedItem.rot,flipH:savedItem.flipH,flipV:savedItem.flipV,
-      crop:{...savedItem.crop},cropMask:savedItem.cropMask,
-      frameSettings:savedItem.frameSettings?JSON.parse(JSON.stringify(savedItem.frameSettings)):null,
-      uncropW:savedItem.uncropW,uncropH:savedItem.uncropH,uncropCx:savedItem.uncropCx,uncropCy:savedItem.uncropCy,
-      panDx:savedItem.panDx||0,panDy:savedItem.panDy||0,
-    }:null,
-  };
+  const restoreData=SBSources.buildRestoreData(s,savedItem);
+  // Remove tracks from WebRTC PeerConnection if this is our local source
+  if(s.stream&&!s.isPeer&&S.wrtc){
+    try{ _removeSourceTracksFromPeers(s); }catch(e){ if(window.__sbDev) console.warn('[rmSrc] WebRTC remove tracks failed:',e); }
+  }
   // Don't stop peer-owned tracks (they belong to the friend's MediaStream)
   if(s.stream&&!s.isPeer)s.stream.getTracks().forEach(t=>{try{t.stop();}catch(_){}});
   if(s.el){s.el.srcObject=null;s.el=null;}
-  if(sid===S.desktopAudioId) S.desktopAudioId=null;
+  if(sid===S.desktopAudioId){ S.desktopAudioId=null; SBAudio._updatePeerMonitorRouting(); }
+  if(S.settings.camSettingsByName&&s.name){delete S.settings.camSettingsByName[s.name];_scheduleSettingsSave();}
+  // Clean up offscreen canvas for cam effects
+  if(s._offCv){s._offCv=null;}
+  // Clean up dedup tracking for this source's stream
+  if(s.msid) S._handledPeerStreams.delete(s.msid);
   S.items=S.items.filter(x=>x.sid!==sid);S.srcs.splice(i,1);
   if(S.selId===sid){S.selId=null;S.selItem=null;}
   // Push undo entry with delete-source data
   S._undoStack.push({label:'удаление «'+s.name+'»',type:'delete-source',restore:restoreData,t:Date.now()});
   while(S._undoStack.length>S._undoMax) S._undoStack.shift();
   rebuildZ();renderSources();renderMixer();updateE();_markDirty();
-  // Broadcast removal — only the owner deletes; remote peers can also request removal but
-  // CoScene relies on LWW + each peer's own copy: broadcast whenever a local action triggered it.
-  if(S.co&&!_isRemote()) S.co.broadcastSourceRemove(sid);
+  // Broadcast removal — only when triggered by local action (not from remote src.remove op)
+  // opts.fromRemote=true means this deletion came from a CoScene src.remove → no echo
+  // opts.fromRecreate=true means this deletion is for re-creation (e.g. WASAPI device change) → no broadcast
+  if(S.co&&!_isRemote()&&!opts.fromRemote&&!opts.fromRecreate) S.co.broadcastSourceRemove(sid);
 }
 function togVis(sid){const s=S.srcs.find(x=>x.id===sid);if(s){s.visible=!s.visible;renderSources();updateE();_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}}
-function togLock(sid){const s=S.srcs.find(x=>x.id===sid);if(!s)return;s.locked=!s.locked;if(s.locked&&S.selItem===sid){S.selItem=null;S.selId=null;}
-  // Reorder: locked sources float to top, unlocked sink below locked ones
-  const idx=S.srcs.indexOf(s);
-  if(idx>=0)S.srcs.splice(idx,1);
-  if(s.locked){
-    S.srcs.unshift(s);
-  }else{
-    const lastLocked=S.srcs.findLastIndex(x=>x.locked);
-    if(lastLocked>=0) S.srcs.splice(lastLocked+1,0,s);
-    else S.srcs.unshift(s);
-  }
-  rebuildZ();renderSources();msg(s.locked?'Источник заблокирован':'Источник разблокирован','info');_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}
+function togLock(sid){const s=S.srcs.find(x=>x.id===sid);if(!s)return;const locked=SBSources.toggleLock(s);rebuildZ();renderSources();msg(locked?'Источник заблокирован':'Источник разблокирован','info');_markDirty();_coSafe(co=>co.broadcastSourceUpdate(s));}
 function selSrc(sid){
   const s=S.srcs.find(x=>x.id===sid);
   if(s&&s.locked){msg('Источник заблокирован — снимите блокировку для редактирования','info');return;}
@@ -2629,7 +2516,7 @@ function addScene(src,broadcast){
   if(src.el){const r=()=>{it.origVW=src.el.videoWidth||1920;it.origVH=src.el.videoHeight||1080;it.naturalAR=it.origVW/it.origVH;};if(src.el.readyState>=1)r();else src.el.onloadedmetadata=r;}
   if(broadcast!==false&&S.co&&!_isRemote()) S.co.queueItemUpsert(it);
 }
-function updateE(){D.sceneEmpty.style.display=S.items.some(x=>{const s=S.srcs.find(z=>z.id===x.sid);return s&&s.visible&&s.el;})?'none':'flex';}
+function updateE(){SBUi.updateEmpty();}
 
 function renderSources(){
   D.sourcesList.innerHTML='';
@@ -2656,7 +2543,6 @@ function renderSources(){
     D.sourcesList.appendChild(el);
   });
 }
-function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 
 // ═══════════════════════════════════════════════════════════
 //  MIXER
@@ -2719,105 +2605,11 @@ function addMixerCh(s){
   D.audioMixer.appendChild(el);
 }
 
-function updateLevels(){
-  // Skip level metering when mixer panel is hidden — saves CPU
-  const mixerVisible=D.audioMixer&&D.audioMixer.offsetParent!==null;
-  for(const[sid,n]of S.audioNodes){
-    // Pre-allocate Uint8Array once per analyser (stored on the node)
-    if(!n._levelBuf) n._levelBuf=new Uint8Array(n.analyser.frequencyBinCount);
-    const d=n._levelBuf;
-    n.analyser.getByteFrequencyData(d);
-    let sum=0;for(let i=0;i<d.length;i++)sum+=d[i];
-    const avg=sum/d.length;
-    const pct=Math.min(100,Math.round(avg/255*100*2.5));
-    const elId=sid===S.desktopAudioId?'lv_desktop':'lv_'+sid;
-    const el=document.getElementById(elId);
-    if(el){
-      el.style.width=pct+'%';
-      el.classList.toggle('clipping',pct>=95);
-    }
-    if(!mixerVisible) continue; // skip DOM writes when hidden
-    const ch=el?.closest('.audio-channel');
-    if(!ch)continue;
-    const slider=ch.querySelector('.audio-slider');
-    if(slider&&slider._dragging)continue;
-    const dbEl=ch.querySelector('.audio-db');
-    if(!dbEl)continue;
-    const src=S.srcs.find(s=>s.id===sid);
-    if(src&&src.muted){dbEl.textContent='MUTE';}
-    else if(src){dbEl.textContent=_toDb(avg);}
-  }
-  // Throttle level metering to ~15 fps — sufficient for visual feedback, saves CPU
-  const now=performance.now();
-  if(!S._lastLevelAt) S._lastLevelAt=0;
-  if(now-S._lastLevelAt>=66){
-    S._lastLevelAt=now;
-    S._levelsRAF=requestAnimationFrame(updateLevels);
-  }else{
-    S._levelsRAF=requestAnimationFrame(updateLevels);
-  }
-}
-
-function _ensureLevelsLoop(){
-  if(S._levelsRAF) return;
-  S._levelsRAF=requestAnimationFrame(updateLevels);
-}
-
-function _toDb(avgByte){
-  if(avgByte<1) return '-60';
-  const db=20*Math.log10(avgByte/255);
-  return Math.round(db)+'dB';
-}
-
-function _hasFx(srcId){
-  const fx=S.audioEffects.get(srcId);
-  if(!fx) return false;
-  return fx.noiseGate||fx.eq||fx.compressor||fx.limiter;
-}
-
-function _dbToLinear(db){return Math.pow(10,db/20);}
 
 // ═══════════════════════════════════════════════════════════
-//  AUDIO EFFECTS — per-fader noise gate, EQ, compressor, limiter
+//  AUDIO EFFECTS — _showFxModal remains in app.js (heavy DOM)
+//  _applyFxState, _hasFx, _dbToLinear, _toDb → SBAudio delegates above
 // ═══════════════════════════════════════════════════════════
-function _applyFxState(srcId){
-  const n=S.audioNodes.get(srcId);
-  const fx=S.audioEffects.get(srcId);
-  if(!n||!fx) return;
-  const c=n.effectsChain;
-  const ctx=S.audioCtx;
-  if(!ctx) return;
-  const t=ctx.currentTime;
-
-  // Gate: send settings to AudioWorkletNode via MessagePort
-  if(c.gateNode && c.gateNode.port){
-    c.gateNode.port.postMessage({
-      enabled: fx.noiseGate||false,
-      thresh:  fx.gateThresh||-40,
-      range:   fx.gateRange||-40,
-      attack:  (fx.gateAttack||10)/1000,
-      hold:    (fx.gateHold||100)/1000,
-      release: (fx.gateRelease||150)/1000,
-    });
-  }
-
-  // EQ: apply values only when enabled, otherwise flat
-  c.eqLow.gain.setTargetAtTime(fx.eq?fx.eqLow:0,t,0.02);
-  c.eqMid.gain.setTargetAtTime(fx.eq?fx.eqMid:0,t,0.02);
-  c.eqHigh.gain.setTargetAtTime(fx.eq?fx.eqHigh:0,t,0.02);
-
-  // Compressor
-  c.compressor.threshold.setTargetAtTime(fx.compressor?fx.compThresh:0,t,0.02);
-  c.compressor.ratio.setTargetAtTime(fx.compressor?fx.compRatio:1,t,0.02);
-  c.compMakeup.gain.setTargetAtTime(fx.compressor?_dbToLinear(fx.compGain):1,t,0.02);
-
-  // Limiter
-  c.limiter.threshold.setTargetAtTime(fx.limiter?(fx.limThresh||-3):0,t,0.02);
-  c.limiter.ratio.setTargetAtTime(fx.limiter?20:1,t,0.02);
-
-  console.log('[FX] Applied:',JSON.stringify(fx));
-}
-
 function _showFxModal(srcId){
   const src=S.srcs.find(s=>s.id===srcId);
   if(!src) return;
@@ -2846,20 +2638,23 @@ function _showFxModal(srcId){
             <button class="btn fx-preset-btn${fx.gateThresh===-30&&fx.gateRange===-20?' active':''}" data-preset="light">Лёгкое</button>
             <button class="btn fx-preset-btn${fx.gateThresh===-40&&fx.gateRange===-40?' active':''}" data-preset="medium">Среднее</button>
             <button class="btn fx-preset-btn${fx.gateThresh===-50&&fx.gateRange===-60?' active':''}" data-preset="heavy">Сильное</button>
+            <button class="btn fx-preset-btn${fx.gateThresh===-55&&fx.gateRange===-80?' active':''}" data-preset="mute">Заглушение</button>
           </div>
           <div class="fx-row"><span class="fx-label">Порог</span><input type="range" class="fx-slider" id="fxGateThresh" min="-80" max="-10" value="${fx.gateThresh}" step="1"/><span class="fx-val" id="fxGateThreshVal">${fx.gateThresh}dB</span></div>
           <div class="fx-row"><span class="fx-label">Глубина</span><input type="range" class="fx-slider" id="fxGateRange" min="-80" max="-6" value="${fx.gateRange}" step="1"/><span class="fx-val" id="fxGateRangeVal">${fx.gateRange}dB</span></div>
           <div class="fx-row"><span class="fx-label">Атака</span><input type="range" class="fx-slider" id="fxGateAttack" min="1" max="100" value="${fx.gateAttack}" step="1"/><span class="fx-val" id="fxGateAttackVal">${fx.gateAttack}мс</span></div>
           <div class="fx-row"><span class="fx-label">Удерж.</span><input type="range" class="fx-slider" id="fxGateHold" min="10" max="500" value="${fx.gateHold}" step="10"/><span class="fx-val" id="fxGateHoldVal">${fx.gateHold}мс</span></div>
           <div class="fx-row"><span class="fx-label">Спад</span><input type="range" class="fx-slider" id="fxGateRelease" min="20" max="500" value="${fx.gateRelease}" step="10"/><span class="fx-val" id="fxGateReleaseVal">${fx.gateRelease}мс</span></div>
-        </div>
-      </div>
-      <div class="fx-section">
-        <div class="fx-header"><span class="fx-name">AI шумодав (RNNoise)</span><button class="fx-toggle ${S._rnnoiseEnabled?'on':''}" id="fxRnnoise">${S._rnnoiseEnabled?'ВКЛ':'ВЫКЛ'}</button></div>
-        <div class="fx-params">
           <div class="fx-row" style="align-items:center;gap:8px">
-            <span class="fx-label" style="flex:1">Нейросетевое удаление шума (требует rnnoise.wasm)</span>
-            <span style="font-size:10px;color:var(--muted)" id="fxRnnoiseStatus">${S._rnnoiseWasmLoaded?'готов':'wasm не загружен'}</span>
+            <span class="fx-label" style="flex:1">Состояние</span>
+            <span style="font-size:10px" id="fxGateState">—</span>
+          </div>
+          <div class="fx-row" style="align-items:center;gap:8px">
+            <span class="fx-label" style="flex:1">Уровень сигнала</span>
+            <div style="width:80px;height:6px;border-radius:3px;background:var(--bg1);overflow:hidden;position:relative">
+              <div id="fxGateLevel" style="height:100%;width:0%;border-radius:3px;transition:width 0.15s;background:#86efac"></div>
+            </div>
+            <span style="font-size:9px;color:var(--muted);min-width:32px" id="fxGateLevelDb">—</span>
           </div>
         </div>
       </div>
@@ -3062,11 +2857,44 @@ function _showFxModal(srcId){
     if(el) el.oninput=liveUpdate;
   });
 
+  // Gate activity monitoring — shows state (open/closed) and signal level from worklet
+  const _gateNode = S.audioNodes.get(srcId)?.effectsChain?.gateNode;
+  if (_gateNode && _gateNode.port) {
+    _gateNode.port.onmessage = (ev) => {
+      if (ev.data.type !== 'gate-state') return;
+      const stateEl = document.getElementById('fxGateState');
+      const levelEl = document.getElementById('fxGateLevel');
+      const levelDbEl = document.getElementById('fxGateLevelDb');
+      const gateOn = document.getElementById('fxGate')?.classList.contains('on');
+      if (stateEl) {
+        if (!gateOn) {
+          stateEl.textContent = 'выключен';
+          stateEl.style.color = 'var(--muted)';
+        } else if (ev.data.open) {
+          stateEl.textContent = 'открыт';
+          stateEl.style.color = '#86efac';
+        } else {
+          stateEl.textContent = 'закрыт';
+          stateEl.style.color = '#fca5a5';
+        }
+      }
+      if (levelEl) {
+        const pct = Math.max(0, Math.min(100, (ev.data.rmsDb + 60) / 60 * 100));
+        levelEl.style.width = pct + '%';
+        levelEl.style.background = ev.data.rmsDb > -6 ? '#fca5a5' : ev.data.rmsDb > -20 ? '#fde68a' : '#86efac';
+      }
+      if (levelDbEl) {
+        levelDbEl.textContent = Math.round(ev.data.rmsDb) + 'dB';
+      }
+    };
+  }
+
   // Preset buttons for noise suppression
   const gatePresets={
     light: {gateThresh:-30,gateRange:-20,gateAttack:20,gateHold:200,gateRelease:200},
     medium:{gateThresh:-40,gateRange:-40,gateAttack:10,gateHold:100,gateRelease:150},
-    heavy: {gateThresh:-50,gateRange:-60,gateAttack:5,gateHold:50,gateRelease:100}
+    heavy: {gateThresh:-50,gateRange:-60,gateAttack:5,gateHold:50,gateRelease:100},
+    mute:  {gateThresh:-55,gateRange:-80,gateAttack:2,gateHold:20,gateRelease:50}
   };
   document.querySelectorAll('.fx-preset-btn:not(.fx-eq-preset):not(.fx-comp-preset)').forEach(btn=>{
     btn.onclick=()=>{
@@ -3197,16 +3025,21 @@ function _showCamSettingsModal(srcId,openTab){
 
     <div id="camTabContentSettings" style="display:${startTab==='settings'?'flex':'none'};gap:16px">
       <div style="flex:1;min-width:0">
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Пресеты</span></div>
-          <div class="fx-params" style="gap:6px">
+        <!-- PRESETS — collapsible -->
+        <div class="fx-section fx-collapsible" data-coll="camPresets">
+          <div class="fx-header coll-toggle" style="cursor:pointer"><span class="fx-name">Пресеты</span><span class="coll-arrow" style="margin-left:auto">▸</span></div>
+          <div class="fx-params coll-body" style="gap:6px">
             <div class="fx-row" style="gap:6px;flex-wrap:wrap">
               <button class="btn fx-preset-btn cam-preset" data-cp="default">По умолчанию</button>
+              <button class="btn fx-preset-btn cam-preset" data-cp="studio">Студия</button>
+              <button class="btn fx-preset-btn cam-preset" data-cp="portrait">Портрет</button>
+              <button class="btn fx-preset-btn cam-preset" data-cp="gaming">Гейминг</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="vivid">Яркий</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="warm">Тёплый</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="cool">Холодный</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="cinematic">Кинематограф</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="bw">Ч/Б</button>
+              <button class="btn fx-preset-btn cam-preset" data-cp="night">Ночь</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="vintage">Винтаж</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="neonGlow">Неон</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="sunset">Закат</button>
@@ -3216,45 +3049,64 @@ function _showCamSettingsModal(srcId,openTab){
               <button class="btn fx-preset-btn cam-preset" data-cp="dreamy">Мечта</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="retro70s">70-е</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="noir">Нуар</button>
+              <button class="btn fx-preset-btn cam-preset" data-cp="retro">Ретро</button>
               <button class="btn fx-preset-btn cam-preset" data-cp="hologram">Голограмма</button>
             </div>
           </div>
         </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Яркость</span><span class="fx-val" id="camBrVal">${cs.brightness>0?'+':''}${cs.brightness}</span></div>
-          <div class="fx-params"><div class="fx-row"><input type="range" class="fx-slider" id="camBr" min="-100" max="100" value="${cs.brightness}" step="1"/></div></div>
+        <!-- COLOR — brightness, contrast, saturation, WB, hue, sepia -->
+        <div class="fx-section fx-collapsible" data-coll="camColor">
+          <div class="fx-header coll-toggle" style="cursor:pointer"><span class="fx-name">Цвет и свет</span><span class="coll-arrow" style="margin-left:auto">▸</span></div>
+          <div class="fx-params coll-body">
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Яркость</span><input type="range" class="fx-slider" id="camBr" min="-100" max="100" value="${cs.brightness}" step="1"/><span class="fx-val" id="camBrVal" style="width:34px;text-align:right">${cs.brightness>0?'+':''}${cs.brightness}</span></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Контраст</span><input type="range" class="fx-slider" id="camCn" min="-100" max="100" value="${cs.contrast}" step="1"/><span class="fx-val" id="camCnVal" style="width:34px;text-align:right">${cs.contrast>0?'+':''}${cs.contrast}</span></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Насыщенность</span><input type="range" class="fx-slider" id="camSa" min="-100" max="100" value="${cs.saturation}" step="1"/><span class="fx-val" id="camSaVal" style="width:34px;text-align:right">${cs.saturation>0?'+':''}${cs.saturation}</span></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Баланс белого <span class="hint-toggle" data-hint="Температура цвета в Кельвинах. 3000K — тёплый жёлтый, 6500K — нейтральный, 9000K — холодный голубой.">?</span></span><input type="range" class="fx-slider" id="camWb" min="3000" max="9000" value="${cs.temperature}" step="100"/><span class="fx-val" id="camWbVal" style="width:44px;text-align:right">${cs.temperature}K</span></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Оттенок</span><input type="range" class="fx-slider" id="camHue" min="-180" max="180" value="${cs.hue||0}" step="1"/><span class="fx-val" id="camHueVal" style="width:34px;text-align:right">${cs.hue||0}°</span></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Сепия</span><input type="range" class="fx-slider" id="camSepia" min="0" max="100" value="${cs.sepia||0}" step="1"/><span class="fx-val" id="camSepiaVal" style="width:34px;text-align:right">${cs.sepia||0}%</span></div>
+          </div>
         </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Контрастность</span><span class="fx-val" id="camCnVal">${cs.contrast>0?'+':''}${cs.contrast}</span></div>
-          <div class="fx-params"><div class="fx-row"><input type="range" class="fx-slider" id="camCn" min="-100" max="100" value="${cs.contrast}" step="1"/></div></div>
+        <!-- SHARPNESS -->
+        <div class="fx-section fx-collapsible" data-coll="camSharp">
+          <div class="fx-header coll-toggle" style="cursor:pointer"><span class="fx-name">Резкость <span class="hint-toggle" data-hint="Unsharp mask (SVG-фильтр). Усиливает контраст границ — чётче изображение. 0 = без обработки.">?</span></span><span class="coll-arrow" style="margin-left:auto">▸</span></div>
+          <div class="fx-params coll-body">
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Резкость</span><input type="range" class="fx-slider" id="camSh" min="0" max="100" value="${cs.sharpness}" step="1"/><span class="fx-val" id="camShVal" style="width:34px;text-align:right">${cs.sharpness}</span></div>
+          </div>
         </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Насыщенность</span><span class="fx-val" id="camSaVal">${cs.saturation>0?'+':''}${cs.saturation}</span></div>
-          <div class="fx-params"><div class="fx-row"><input type="range" class="fx-slider" id="camSa" min="-100" max="100" value="${cs.saturation}" step="1"/></div></div>
+        <!-- CAPTURE — resolution, FPS, autofocus -->
+        <div class="fx-section fx-collapsible" data-coll="camCapture">
+          <div class="fx-header coll-toggle" style="cursor:pointer"><span class="fx-name">Захват камеры</span><span class="coll-arrow" style="margin-left:auto">▸</span></div>
+          <div class="fx-params coll-body">
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Разрешение</span><select id="camRes" style="flex:1;padding:4px 7px;border:1px solid var(--glass-border);border-radius:var(--r-sm);background:rgba(255,255,255,.04);color:var(--text);font-size:12px">${resOpts}</select></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">FPS <span class="hint-toggle" data-hint="Частота кадров камеры. 24 — киношный вид, 30 — стандарт, 60 — плавное. Авто — камера выберет сама.">?</span></span><select id="camFps" style="flex:1;padding:4px 7px;border:1px solid var(--glass-border);border-radius:var(--r-sm);background:rgba(255,255,255,.04);color:var(--text);font-size:12px"><option value="0"${(cs.fps||0)===0?' selected':''}>Авто</option><option value="15"${(cs.fps||0)===15?' selected':''}>15 fps</option><option value="24"${(cs.fps||0)===24?' selected':''}>24 fps (кино)</option><option value="30"${(cs.fps||0)===30?' selected':''}>30 fps</option><option value="60"${(cs.fps||0)===60?' selected':''}>60 fps</option></select></div>
+            <div class="fx-row" style="justify-content:space-between;align-items:center"><div style="display:flex;align-items:center;gap:6px"><span class="fx-label">Автофокус <span class="hint-toggle" data-hint="Автофокусировка камеры. Выкл если фокус «плавает» при смене освещения.">?</span></span></div><label class="fx-switch"><input type="checkbox" id="camAF" ${cs.autoFocus?'checked':''}/><span class="fx-switch-label" id="afBadge">${cs.autoFocus?'ВКЛ':'ВЫКЛ'}</span></label></div>
+            <div id="camHwCaps" style="display:none;margin-top:8px">
+              <div style="font-size:10px;color:var(--accent);margin-bottom:4px">🎛 Аппаратные настройки камеры</div>
+              <div id="camHwBody"></div>
+            </div>
+          </div>
         </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Баланс белого</span><span class="fx-val" id="camWbVal">${cs.temperature}K</span></div>
-          <div class="fx-params"><div class="fx-row"><input type="range" class="fx-slider" id="camWb" min="3000" max="9000" value="${cs.temperature}" step="100"/></div></div>
+        <!-- DIGITAL ZOOM — collapsible -->
+        <div class="fx-section fx-collapsible" data-coll="camZoom">
+          <div class="fx-header coll-toggle" style="cursor:pointer"><span class="fx-name">Цифровой зум <span class="hint-toggle" data-hint="Зум из исходника камеры — берёт центральную часть и растягивает. Качество выше чем масштабирование в сцене. Без потери FPS.">?</span></span><span class="coll-arrow" style="margin-left:auto">▸</span></div>
+          <div class="fx-params coll-body">
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Зум</span><input type="range" class="fx-slider" id="camDZ" min="100" max="300" value="${Math.round((cs.digitalZoom||1)*100)}" step="5"/><span class="fx-val" id="camDZVal" style="width:40px;text-align:right">${(cs.digitalZoom||1).toFixed(1)}x</span></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Пан X</span><input type="range" class="fx-slider" id="camPanX" min="-100" max="100" value="${Math.round((cs.digitalZoomX||0)*100)}" step="1"/><span class="fx-val" id="camPanXVal" style="width:34px;text-align:right">${Math.round((cs.digitalZoomX||0)*100)}</span></div>
+            <div class="fx-row" style="align-items:center;gap:8px"><span class="fx-label" style="min-width:80px">Пан Y</span><input type="range" class="fx-slider" id="camPanY" min="-100" max="100" value="${Math.round((cs.digitalZoomY||0)*100)}" step="1"/><span class="fx-val" id="camPanYVal" style="width:34px;text-align:right">${Math.round((cs.digitalZoomY||0)*100)}</span></div>
+          </div>
         </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Чёткость</span><span class="fx-val" id="camShVal">${cs.sharpness}</span></div>
-          <div class="fx-params"><div class="fx-row"><input type="range" class="fx-slider" id="camSh" min="0" max="100" value="${cs.sharpness}" step="1"/></div></div>
+        <!-- FLIP — collapsible -->
+        <div class="fx-section fx-collapsible" data-coll="camFlip">
+          <div class="fx-header coll-toggle" style="cursor:pointer"><span class="fx-name">Зеркало</span><span class="coll-arrow" style="margin-left:auto">▸</span></div>
+          <div class="fx-params coll-body">
+            <div class="fx-row" style="gap:10px">
+              <button class="btn fx-preset-btn${cs.flipH?' active':''}" id="camFlipH" style="flex:1">↔ Горизонт.</button>
+              <button class="btn fx-preset-btn${cs.flipV?' active':''}" id="camFlipV" style="flex:1">↕ Вертикал.</button>
+            </div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">Переворот видеопотока, не влияет на позицию в сцене.</div>
+          </div>
         </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Оттенок</span><span class="fx-val" id="camHueVal">${cs.hue||0}°</span></div>
-          <div class="fx-params"><div class="fx-row"><input type="range" class="fx-slider" id="camHue" min="-180" max="180" value="${cs.hue||0}" step="1"/></div></div>
-        </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Сепия</span><span class="fx-val" id="camSepiaVal">${cs.sepia||0}%</span></div>
-          <div class="fx-params"><div class="fx-row"><input type="range" class="fx-slider" id="camSepia" min="0" max="100" value="${cs.sepia||0}" step="1"/></div></div>
-        </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Автофокус</span><label class="fx-switch"><input type="checkbox" id="camAF" ${cs.autoFocus?'checked':''}/><span class="fx-switch-label" id="afBadge">${cs.autoFocus?'ВКЛ':'ВЫКЛ'}</span></label></div>
-        </div>
-        <div class="fx-section">
-          <div class="fx-header"><span class="fx-name">Разрешение</span></div>
-          <div class="fx-params"><select id="camRes" style="width:100%;padding:5px 8px;border:1px solid var(--glass-border);border-radius:var(--r-sm);background:rgba(255,255,255,.04);color:var(--text);font-size:12px">${resOpts}</select></div>
-        </div>
+        <div id="camTrackInfo" style="margin-top:8px;font-size:10px;color:var(--muted);text-align:center;max-width:240px"></div>
         <div style="text-align:right;margin-top:4px"><button class="btn" id="btnCamReset">Сброс настроек</button></div>
       </div>
       <div style="width:300px;flex-shrink:0;display:flex;flex-direction:column;align-items:center">
@@ -3432,10 +3284,12 @@ function _showCamSettingsModal(srcId,openTab){
     if(!it){
       const sc=Math.min(cw/vw,ch/vh);
       const dw=vw*sc,dh=vh*sc;
-      const hasCamFx=src.camSettings&&(src.camSettings.brightness!==0||src.camSettings.contrast!==0||src.camSettings.saturation!==0||(src.camSettings.temperature&&src.camSettings.temperature!==6500)||(src.camSettings.sharpness&&src.camSettings.sharpness>0)||(src.camSettings.hue&&src.camSettings.hue!==0)||(src.camSettings.sepia&&src.camSettings.sepia!==0));
-      if(hasCamFx){const f=_buildCamFilterStr(src.camSettings);if(f)previewCtx.filter=f;}
-      previewCtx.drawImage(v,(cw-dw)/2,(ch-dh)/2,dw,dh);
-      if(hasCamFx) previewCtx.filter='none';
+      const hasCamFx=src.camSettings&&(src.camSettings.sharpness>0||src.camSettings.denoise>0||src.camSettings.brightness!==0||src.camSettings.contrast!==0||src.camSettings.saturation!==0||(src.camSettings.temperature&&src.camSettings.temperature!==6500)||(src.camSettings.hue&&src.camSettings.hue!==0)||(src.camSettings.sepia&&src.camSettings.sepia>0));
+      const _drawSrc=hasCamFx?SBScene._applyCamFxOffscreen(src,v,src.camSettings):v;
+      // Camera-level flip
+      if(src.camSettings&&(src.camSettings.flipH||src.camSettings.flipV)){previewCtx.save();previewCtx.scale(src.camSettings.flipH?-1:1,src.camSettings.flipV?-1:1);}
+      previewCtx.drawImage(_drawSrc,(cw-dw)/2,(ch-dh)/2,dw,dh);
+      if(src.camSettings&&(src.camSettings.flipH||src.camSettings.flipV)) previewCtx.restore();
       if(!document.getElementById('camModal'))return;
       _previewRAF=requestAnimationFrame(_renderPreview);
       return;
@@ -3469,10 +3323,19 @@ function _showCamSettingsModal(srcId,openTab){
 
     // Cam filter
     const hasCamFx=src.camSettings&&(src.camSettings.brightness!==0||src.camSettings.contrast!==0||src.camSettings.saturation!==0||(src.camSettings.temperature&&src.camSettings.temperature!==6500)||(src.camSettings.sharpness&&src.camSettings.sharpness>0)||(src.camSettings.hue&&src.camSettings.hue!==0)||(src.camSettings.sepia&&src.camSettings.sepia!==0));
-    if(hasCamFx){const f=_buildCamFilterStr(src.camSettings);if(f)previewCtx.filter=f;}
-
-    const sx=cr.l*vw,sy=cr.t*vh;const pdx2=it.panDx||0,pdy2=it.panDy||0;const sw2=Math.max(1,vw*(1-cr.l-cr.r)),sh2=Math.max(1,vh*(1-cr.t-cr.b));if(it.cropMask&&it.cropMask!=='none'){const cs2=Math.max(dw/sw2,dh/sh2)*CIRCLE_PAN_ZOOM;const ddw=sw2*cs2,ddh=sh2*cs2;previewCtx.drawImage(v,sx-pdx2*(sw2/ddw),sy-pdy2*(sh2/ddh),sw2,sh2,-ddw/2,-ddh/2,ddw,ddh);}else{const scX2=sw2/dw,scY2=sh2/dh;previewCtx.drawImage(v,sx-pdx2*scX2,sy-pdy2*scY2,sw2,sh2,-dw/2,-dh/2,dw,dh);}
-    if(hasCamFx) previewCtx.filter='none';
+    const _cs=src.camSettings;
+    // Camera flip in preview
+    if(_cs&&(_cs.flipH||_cs.flipV)) previewCtx.scale(_cs.flipH?-1:1,_cs.flipV?-1:1);
+    // Digital zoom in preview
+    let _sx=cr.l*vw,_sy=cr.t*vh,_sw=Math.max(1,vw*(1-cr.l-cr.r)),_sh=Math.max(1,vh*(1-cr.t-cr.b));
+    if(_cs&&_cs.digitalZoom&&_cs.digitalZoom>1.01){const dz=_cs.digitalZoom,dzx=_cs.digitalZoomX||0,dzy=_cs.digitalZoomY||0;const zw=_sw/dz,zh=_sh/dz;_sx=_sx+(_sw-zw)/2+(dzx*(_sw-zw)/2);_sy=_sy+(_sh-zh)/2+(dzy*(_sh-zh)/2);_sw=zw;_sh=zh;}
+    const pdx2=it.panDx||0,pdy2=it.panDy||0;
+    if(hasCamFx){
+      const _drawSrc2=SBScene._applyCamFxOffscreen(src,v,_cs);
+      if(it.cropMask&&it.cropMask!=='none'){const cs2=Math.max(dw/_sw,dh/_sh)*CIRCLE_PAN_ZOOM;const ddw=_sw*cs2,ddh=_sh*cs2;previewCtx.drawImage(_drawSrc2,_sx-pdx2*(_sw/ddw),_sy-pdy2*(_sh/ddh),_sw,_sh,-ddw/2,-ddh/2,ddw,ddh);}else{const scX2=_sw/dw,scY2=_sh/dh;previewCtx.drawImage(_drawSrc2,_sx-pdx2*scX2,_sy-pdy2*scY2,_sw,_sh,-dw/2,-dh/2,dw,dh);}
+    }else{
+      if(it.cropMask&&it.cropMask!=='none'){const cs2=Math.max(dw/_sw,dh/_sh)*CIRCLE_PAN_ZOOM;const ddw=_sw*cs2,ddh=_sh*cs2;previewCtx.drawImage(v,_sx-pdx2*(_sw/ddw),_sy-pdy2*(_sh/ddh),_sw,_sh,-ddw/2,-ddh/2,ddw,ddh);}else{const scX2=_sw/dw,scY2=_sh/dh;previewCtx.drawImage(v,_sx-pdx2*scX2,_sy-pdy2*scY2,_sw,_sh,-dw/2,-dh/2,dw,dh);}
+    }
 
     // Draw border (preview-mode flag for adaptive halo). Edge fade is applied inside _drawBorder.
     const fakeIt={w:dw,h:dh,cx:0,cy:0,rot:0,flipH:false,flipV:false,cropMask:it.cropMask||'none',frameSettings:it.frameSettings,_isPreview:true};
@@ -3571,6 +3434,11 @@ function _showCamSettingsModal(srcId,openTab){
     const sepia=parseInt(document.getElementById('camSepia')?document.getElementById('camSepia').value:'0');
     const af=document.getElementById('camAF').checked;
     const res=document.getElementById('camRes').value;
+    const fps=parseInt(document.getElementById('camFps')?document.getElementById('camFps').value:'0')||0;
+    const dn=0; // denoise removed from camera UI
+    const dz=parseInt(document.getElementById('camDZ')?document.getElementById('camDZ').value:'100')/100;
+    const panX=parseInt(document.getElementById('camPanX')?document.getElementById('camPanX').value:'0')/100;
+    const panY=parseInt(document.getElementById('camPanY')?document.getElementById('camPanY').value:'0')/100;
     src.camSettings.brightness=br;
     src.camSettings.contrast=cn;
     src.camSettings.saturation=sa;
@@ -3580,6 +3448,12 @@ function _showCamSettingsModal(srcId,openTab){
     src.camSettings.sepia=sepia;
     src.camSettings.autoFocus=af;
     src.camSettings.resolution=res;
+    src.camSettings.fps=fps;
+    src.camSettings.denoise=dn;
+    src.camSettings.digitalZoom=dz;
+    src.camSettings.digitalZoomX=panX;
+    src.camSettings.digitalZoomY=panY;
+    src._offCv=null;
     document.getElementById('camBrVal').textContent=(br>0?'+':'')+br;
     document.getElementById('camCnVal').textContent=(cn>0?'+':'')+cn;
     document.getElementById('camSaVal').textContent=(sa>0?'+':'')+sa;
@@ -3589,23 +3463,32 @@ function _showCamSettingsModal(srcId,openTab){
     document.getElementById('camSepiaVal').textContent=sepia+'%';
     document.getElementById('afBadge').textContent=af?'ВКЛ':'ВЫКЛ';
     document.getElementById('afBadge').className='fx-switch-label'+(af?' on':'');
+    // denoise removed from camera UI — value stays 0
+    const dzEl=document.getElementById('camDZVal');if(dzEl)dzEl.textContent=dz.toFixed(1)+'x';
+    const pxEl=document.getElementById('camPanXVal');if(pxEl)pxEl.textContent=Math.round(panX*100);
+    const pyEl=document.getElementById('camPanYVal');if(pyEl)pyEl.textContent=Math.round(panY*100);
     document.querySelectorAll('.cam-preset').forEach(b=>b.classList.remove('active'));
-    // Co-session: replicate camera settings to peers
+    // Persist camSettings per source name
+    if(!S.settings.camSettingsByName) S.settings.camSettingsByName={};
+    S.settings.camSettingsByName[src.name]={...src.camSettings};
     _coSafe(co=>co.broadcastSourceUpdate());
-    // Resolution change — including "auto" (empty res) → fully reinit camera so old big buffers are released
+    // Resolution/FPS change — reinit camera track when res or fps actually changed
     if(vt){
+      if(src.camSettings._prevRes===undefined) src.camSettings._prevRes=res;
+      if(src.camSettings._prevFps===undefined) src.camSettings._prevFps=fps;
       const settings=vt.getSettings();
-      if(res){
+      const prevRes=src.camSettings._prevRes;
+      const prevFps=src.camSettings._prevFps;
+      if(res&&res!==prevRes){
         const [w,h]=res.split('x').map(Number);
-        if(w&&h&&(settings.width!==w||settings.height!==h)){
-          _changeCamResolution(src,w,h);
-        }
-      }else{
-        // Auto: reinit to release any high-res buffers
-        if(settings.width&&settings.height&&settings.width>=1920){
-          _changeCamResolution(src,0,0);
-        }
+        if(w&&h){_changeCamResolution(src,w,h,fps>0?fps:30);}
+      }else if(!res&&prevRes){
+        _changeCamResolution(src,0,0,fps>0?fps:30);
+      }else if(fps!==prevFps&&fps>0){
+        _changeCamResolution(src,0,0,fps);
       }
+      src.camSettings._prevRes=res;
+      src.camSettings._prevFps=fps;
     }
   };
 
@@ -3678,35 +3561,49 @@ function _showCamSettingsModal(srcId,openTab){
 
   // Camera presets
   const camPresets={
-    default:{brightness:0,contrast:0,saturation:0,temperature:6500,sharpness:0,hue:0,sepia:0},
-    vivid:{brightness:15,contrast:40,saturation:60,temperature:6000,sharpness:20,hue:0,sepia:0},
-    warm:{brightness:10,contrast:15,saturation:10,temperature:4000,sharpness:5,hue:10,sepia:25},
-    cool:{brightness:-5,contrast:20,saturation:-20,temperature:9000,sharpness:10,hue:-15,sepia:0},
-    cinematic:{brightness:-10,contrast:45,saturation:-25,temperature:4500,sharpness:10,hue:5,sepia:15},
-    bw:{brightness:5,contrast:35,saturation:-100,temperature:6500,sharpness:25,hue:0,sepia:0},
-    vintage:{brightness:5,contrast:10,saturation:-30,temperature:5500,sharpness:0,hue:15,sepia:40},
-    neonGlow:{brightness:20,contrast:50,saturation:80,temperature:7500,sharpness:15,hue:-30,sepia:0},
-    sunset:{brightness:15,contrast:25,saturation:40,temperature:3500,sharpness:5,hue:20,sepia:35},
-    arctic:{brightness:-15,contrast:30,saturation:-40,temperature:10000,sharpness:15,hue:-20,sepia:0},
-    film:{brightness:-5,contrast:20,saturation:-15,temperature:5000,sharpness:0,hue:8,sepia:20},
-    dramatic:{brightness:-15,contrast:60,saturation:-10,temperature:5000,sharpness:20,hue:0,sepia:10},
-    dreamy:{brightness:20,contrast:-10,saturation:20,temperature:7000,sharpness:-10,hue:25,sepia:15},
-    retro70s:{brightness:10,contrast:15,saturation:30,temperature:4000,sharpness:-5,hue:30,sepia:50},
-    noir:{brightness:-10,contrast:55,saturation:-80,temperature:5500,sharpness:30,hue:0,sepia:20},
-    hologram:{brightness:25,contrast:35,saturation:50,temperature:8000,sharpness:10,hue:90,sepia:0}
+    default:{brightness:0,contrast:0,saturation:0,temperature:6500,sharpness:0,denoise:0,hue:0,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    vivid:{brightness:15,contrast:40,saturation:60,temperature:6000,sharpness:20,denoise:0,hue:0,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    warm:{brightness:10,contrast:15,saturation:10,temperature:4000,sharpness:5,denoise:0,hue:10,sepia:25,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    cool:{brightness:-5,contrast:20,saturation:-20,temperature:9000,sharpness:10,denoise:0,hue:-15,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    cinematic:{brightness:-10,contrast:45,saturation:-25,temperature:4500,sharpness:10,denoise:5,hue:5,sepia:15,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    bw:{brightness:5,contrast:35,saturation:-100,temperature:6500,sharpness:25,denoise:0,hue:0,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    vintage:{brightness:5,contrast:10,saturation:-30,temperature:5500,sharpness:0,denoise:20,hue:15,sepia:40,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    neonGlow:{brightness:20,contrast:50,saturation:80,temperature:7500,sharpness:15,denoise:0,hue:-30,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    sunset:{brightness:15,contrast:25,saturation:40,temperature:3500,sharpness:5,denoise:0,hue:20,sepia:35,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    arctic:{brightness:-15,contrast:30,saturation:-40,temperature:10000,sharpness:15,denoise:0,hue:-20,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    film:{brightness:-5,contrast:20,saturation:-15,temperature:5000,sharpness:0,denoise:10,hue:8,sepia:20,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    dramatic:{brightness:-15,contrast:60,saturation:-10,temperature:5000,sharpness:20,denoise:0,hue:0,sepia:10,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    dreamy:{brightness:20,contrast:-10,saturation:20,temperature:7000,sharpness:-10,denoise:15,hue:25,sepia:15,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    retro70s:{brightness:10,contrast:15,saturation:30,temperature:4000,sharpness:-5,denoise:20,hue:30,sepia:50,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    noir:{brightness:-10,contrast:55,saturation:-80,temperature:5500,sharpness:30,denoise:0,hue:0,sepia:20,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    hologram:{brightness:25,contrast:35,saturation:50,temperature:8000,sharpness:10,denoise:0,hue:90,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    studio:{brightness:5,contrast:25,saturation:15,temperature:6200,sharpness:35,denoise:0,hue:0,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    portrait:{brightness:8,contrast:10,saturation:20,temperature:5500,sharpness:15,denoise:10,hue:5,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    gaming:{brightness:10,contrast:40,saturation:55,temperature:6800,sharpness:45,denoise:0,hue:0,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    night:{brightness:30,contrast:-5,saturation:-10,temperature:6000,sharpness:15,denoise:55,hue:0,sepia:0,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0},
+    retro:{brightness:5,contrast:15,saturation:-25,temperature:5200,sharpness:0,denoise:20,hue:12,sepia:45,flipH:false,flipV:false,digitalZoom:1.0,digitalZoomX:0,digitalZoomY:0}
   };
 
   document.querySelectorAll('.cam-preset').forEach(btn=>{
     btn.onclick=()=>{
       const p=camPresets[btn.dataset.cp];
       if(!p) return;
-      document.getElementById('camBr').value=p.brightness;
-      document.getElementById('camCn').value=p.contrast;
-      document.getElementById('camSa').value=p.saturation;
-      document.getElementById('camWb').value=p.temperature;
-      document.getElementById('camSh').value=p.sharpness;
+      const _set=(id,v)=>{const el=document.getElementById(id);if(el)el.value=v;};
+      _set('camBr',p.brightness);
+      _set('camCn',p.contrast);
+      _set('camSa',p.saturation);
+      _set('camWb',p.temperature);
+      _set('camSh',p.sharpness);
+      // denoise removed from camera UI
       if(document.getElementById('camHue')) document.getElementById('camHue').value=p.hue||0;
       if(document.getElementById('camSepia')) document.getElementById('camSepia').value=p.sepia||0;
+      _set('camDZ',Math.round((p.digitalZoom||1)*100));
+      _set('camPanX',Math.round((p.digitalZoomX||0)*100));
+      _set('camPanY',Math.round((p.digitalZoomY||0)*100));
+      src.camSettings.flipH=p.flipH||false;
+      src.camSettings.flipV=p.flipV||false;
+      const fhBtn=document.getElementById('camFlipH');if(fhBtn)fhBtn.classList.toggle('active',p.flipH||false);
+      const fvBtn=document.getElementById('camFlipV');if(fvBtn)fvBtn.classList.toggle('active',p.flipV||false);
       document.querySelectorAll('.cam-preset').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
       liveUpdate();
@@ -3734,8 +3631,30 @@ function _showCamSettingsModal(srcId,openTab){
       sec.classList.toggle('open');
       const arr=h.querySelector('.coll-arrow');
       if(arr) arr.textContent=sec.classList.contains('open')?'▾':'▸';
+      // Persist collapsed state
+      const collName=sec.dataset.coll;
+      if(collName){
+        if(!S.settings.collapsedSections) S.settings.collapsedSections={};
+        S.settings.collapsedSections[collName]=!sec.classList.contains('open');
+        _scheduleSettingsSave();
+      }
     };
   });
+  // Restore collapsed state from settings
+  if(S.settings.collapsedSections){
+    document.querySelectorAll('.fx-collapsible[data-coll]').forEach(sec=>{
+      const collName=sec.dataset.coll;
+      if(collName && S.settings.collapsedSections[collName]===true){
+        sec.classList.remove('open');
+        const arr=sec.querySelector('.coll-arrow');
+        if(arr) arr.textContent='▸';
+      } else if(collName && S.settings.collapsedSections[collName]===false){
+        sec.classList.add('open');
+        const arr=sec.querySelector('.coll-arrow');
+        if(arr) arr.textContent='▾';
+      }
+    });
+  }
 
   // Frame presets
   document.querySelectorAll('.frame-preset').forEach(btn=>{
@@ -3796,8 +3715,28 @@ function _showCamSettingsModal(srcId,openTab){
     document.getElementById('camSh').value=0;
     if(document.getElementById('camHue')) document.getElementById('camHue').value=0;
     if(document.getElementById('camSepia')) document.getElementById('camSepia').value=0;
+    // denoise removed from camera UI
+    if(document.getElementById('camDZ')) document.getElementById('camDZ').value=100;
+    if(document.getElementById('camPanX')) document.getElementById('camPanX').value=0;
+    if(document.getElementById('camPanY')) document.getElementById('camPanY').value=0;
     document.getElementById('camAF').checked=true;
     document.getElementById('camRes').value='';
+    if(document.getElementById('camFps')) document.getElementById('camFps').value='0';
+    src.camSettings.flipH=false;src.camSettings.flipV=false;
+    const fhBtn=document.getElementById('camFlipH');if(fhBtn)fhBtn.classList.remove('active');
+    const fvBtn=document.getElementById('camFlipV');if(fvBtn)fvBtn.classList.remove('active');
+    // Reset hardware camera settings
+    if(vt){
+      try{
+        const caps=vt.getCapabilities?vt.getCapabilities():{};
+        const adv=[];
+        if(caps.exposureCompensation) adv.push({exposureCompensation:0});
+        if(caps.focusMode) adv.push({focusMode:'continuous'});
+        if(caps.whiteBalanceMode) adv.push({whiteBalanceMode:'continuous'});
+        if(caps.brightness){const mid=Math.round((caps.brightness.min+caps.brightness.max)/2);adv.push({brightness:mid});}
+        if(adv.length>0) vt.applyConstraints({advanced:adv});
+      }catch(_){}
+    }
     document.querySelectorAll('.cam-preset').forEach(b=>b.classList.remove('active'));
     liveUpdate();
   };
@@ -3849,6 +3788,58 @@ function _showCamSettingsModal(srcId,openTab){
   });
   document.getElementById('camAF').onchange=liveUpdate;
   document.getElementById('camRes').onchange=liveUpdate;
+  document.getElementById('camFps').onchange=liveUpdate;
+  // denoise removed from camera UI
+  if(document.getElementById('camDZ')) document.getElementById('camDZ').oninput=liveUpdate;
+  if(document.getElementById('camPanX')) document.getElementById('camPanX').oninput=liveUpdate;
+  if(document.getElementById('camPanY')) document.getElementById('camPanY').oninput=liveUpdate;
+  // Flip H/V buttons
+  const flipHBtn=document.getElementById('camFlipH');
+  if(flipHBtn) flipHBtn.onclick=()=>{
+    src.camSettings.flipH=!src.camSettings.flipH;
+    flipHBtn.classList.toggle('active',src.camSettings.flipH);
+    _markDirty();_coSafe(co=>co.broadcastSourceUpdate());
+  };
+  const flipVBtn=document.getElementById('camFlipV');
+  if(flipVBtn) flipVBtn.onclick=()=>{
+    src.camSettings.flipV=!src.camSettings.flipV;
+    flipVBtn.classList.toggle('active',src.camSettings.flipV);
+    _markDirty();_coSafe(co=>co.broadcastSourceUpdate());
+  };
+  // Hardware camera probe
+  if(vt){
+    const st=vt.getSettings()||{};
+    const infoEl=document.getElementById('camTrackInfo');
+    if(infoEl) infoEl.textContent='Камера: '+(st.width||'?')+'x'+(st.height||'?')+' @ '+Math.round(st.frameRate||0)+' fps';
+    try{
+      if(typeof ImageCapture!=='undefined'){
+        const ic=new ImageCapture(vt);
+        const tCaps=vt.getCapabilities?vt.getCapabilities():{};
+        const hwBody=document.getElementById('camHwBody');
+        const hwCaps=document.getElementById('camHwCaps');
+        const hwItems=[];
+        if(tCaps.exposureCompensation&&tCaps.exposureCompensation.min!==undefined){
+          hwItems.push('<div class="fx-row" style="margin-top:4px"><span class="fx-label" style="font-size:11px">Экспозиция</span><input type="range" class="fx-slider" id="hwExposure" min="'+tCaps.exposureCompensation.min+'" max="'+tCaps.exposureCompensation.max+'" step="'+(tCaps.exposureCompensation.step||1)+'" value="'+(tCaps.exposureCompensation.current||0)+'"/><span class="fx-val" id="hwExpVal" style="width:28px;text-align:right">'+(tCaps.exposureCompensation.current||0)+'</span></div>');
+        }
+        if(tCaps.colorTemperature&&tCaps.colorTemperature.min!==undefined){
+          hwItems.push('<div class="fx-row" style="margin-top:4px"><span class="fx-label" style="font-size:11px">Цвет (hw)</span><input type="range" class="fx-slider" id="hwColorTemp" min="'+tCaps.colorTemperature.min+'" max="'+tCaps.colorTemperature.max+'" step="'+(tCaps.colorTemperature.step||100)+'" value="'+(tCaps.colorTemperature.current||6500)+'"/><span class="fx-val" id="hwColorTempVal" style="width:40px;text-align:right">'+(tCaps.colorTemperature.current||6500)+'K</span></div>');
+        }
+        if(tCaps.brightness&&tCaps.brightness.min!==undefined){
+          hwItems.push('<div class="fx-row" style="margin-top:4px"><span class="fx-label" style="font-size:11px">Яркость (hw)</span><input type="range" class="fx-slider" id="hwBrightness" min="'+tCaps.brightness.min+'" max="'+tCaps.brightness.max+'" step="'+(tCaps.brightness.step||1)+'" value="'+(tCaps.brightness.current!=null?tCaps.brightness.current:Math.round((tCaps.brightness.min+tCaps.brightness.max)/2))+'"/><span class="fx-val" id="hwBrightnessVal" style="width:28px;text-align:right">'+(tCaps.brightness.current!=null?tCaps.brightness.current:Math.round((tCaps.brightness.min+tCaps.brightness.max)/2))+'</span></div>');
+        }
+        if(hwItems.length>0&&hwBody&&hwCaps){
+          hwBody.innerHTML=hwItems.join('');
+          hwCaps.style.display='block';
+          const hwExpEl=document.getElementById('hwExposure');
+          if(hwExpEl) hwExpEl.oninput=()=>{const v=parseFloat(hwExpEl.value);document.getElementById('hwExpVal').textContent=v;try{vt.applyConstraints({advanced:[{exposureCompensation:v}]});}catch(_){}};
+          const hwCtEl=document.getElementById('hwColorTemp');
+          if(hwCtEl) hwCtEl.oninput=()=>{const v=parseInt(hwCtEl.value);document.getElementById('hwColorTempVal').textContent=v+'K';try{vt.applyConstraints({advanced:[{colorTemperature:v,whiteBalanceMode:'manual'}]});}catch(_){}};
+          const hwBrEl=document.getElementById('hwBrightness');
+          if(hwBrEl) hwBrEl.oninput=()=>{const v=parseFloat(hwBrEl.value);document.getElementById('hwBrightnessVal').textContent=v;try{vt.applyConstraints({advanced:[{brightness:v}]});}catch(_){}};
+        }
+      }
+    }catch(_){}
+  }
 
   // Frame controls live update
   ['frameThick','frameOpacity','frameGlowSize','frameBlurSize','frameBlurStr','frameVigStr','frameVigSize','frameAnimI'].forEach(id=>{
@@ -3993,23 +3984,34 @@ async function createRoom(){
   try{
     const now=Date.now();if(now-S._lastRoomCreateAt<5000){msg('Подождите 5 секунд','info');return;}
     S._lastRoomCreateAt=now;
+    // Check room limit (max 2)
+    if(window.electronAPI?.roomsList){
+      const lr=await window.electronAPI.roomsList();
+      if(lr&&lr.ok&&Array.isArray(lr.data)&&lr.data.length>=2){
+        msg('Максимум 2 комнаты. Удалите старую во вкладке «Мои комнаты».','error');return;
+      }
+    }
     if(!S.wrtc)S.wrtc=new WebRTCManager();
+    S.wrtc._userJoinedRoom=true;
     // Auto-fetch TURN credentials from server
     try{const tc=await window.electronAPI.getTurnCredentials?.();if(tc&&tc.url)S.wrtc.setTurnConfig(tc.url,tc.username,tc.credential);}catch{}
     setupW();
     D.connectError.style.display='none';
     D.btnCreateRoom.textContent='Создание...';D.btnCreateRoom.disabled=true;
     if(window.electronAPI&&window.electronAPI.roomsCreate){
-      const r=await window.electronAPI.roomsCreate({name:''});
+      const roomName=(D.roomNameInput?.value||'').trim();
+      const r=await window.electronAPI.roomsCreate({name:roomName});
       if(!r||!r.ok){throw new Error(r?.error||'Ошибка создания комнаты');}
       const code=r.data?.code;
       if(!code){throw new Error('Сервер не вернул код комнаты');}
       S.wrtc.roomCode=code;
-      S.wrtc.myPeerId=S.settings?.profile?.userId||'local';
+      S.wrtc.myPeerId=S.settings?.profile?.serverId||S.settings?.profile?.id||'local';
       S.wrtc.setSignalingChannel((signalMsg)=>{
         window.electronAPI.presenceSend(JSON.stringify(signalMsg));
       });
       if(S.wrtc.onRoomCreated)S.wrtc.onRoomCreated(code,S.wrtc.myPeerId);
+      // Source streams will be sent when peers connect via onPeerConnectionsReady callback
+      ensureAudioCtx();_rebuildCombinedStream();
       msg('Комната создана: '+code,'ok');
     }else{
       S.wrtc.setSignalingServer('wss://streambro.ru/signaling');
@@ -4021,9 +4023,42 @@ async function createRoom(){
     D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;
   }
 }
+
+async function _autoRejoinRoom(){
+  // If user was in a P2P room before restart, automatically rejoin it.
+  // roomCode is saved in settings.p2p.roomCode and cleared on explicit leave.
+  const savedRoomCode=S.settings?.p2p?.roomCode;
+  if(!savedRoomCode) return;
+  // Only rejoin if user is logged in (has Presence WS) — rooms are server-managed
+  if(!window.electronAPI?.roomsJoin) return;
+  _p2pLog('[P2P] Auto-rejoining room: '+savedRoomCode);
+  // Delay slightly to let Presence WS settle
+  setTimeout(async()=>{
+    try{
+      // Verify the room still exists on the server
+      const info=await window.electronAPI.roomsGet(savedRoomCode);
+      if(!info||!info.ok||!info.data||info.data.status!=='ACTIVE'){
+        _p2pLog('[P2P] Saved room no longer active, clearing');
+        S.roomCode=null;
+        _scheduleSettingsSave();
+        return;
+      }
+      // Rejoin — same as manually entering the code
+      D.joinRoomCode.value=savedRoomCode;
+      await joinRoom();
+      _p2pLog('[P2P] Auto-rejoin succeeded');
+    }catch(e){
+      _p2pLog('[P2P] WARN: Auto-rejoin failed: '+e.message);
+      S.roomCode=null;
+      _scheduleSettingsSave();
+    }
+  },2000);
+}
+
 async function joinRoom(){
   try{
     if(!S.wrtc)S.wrtc=new WebRTCManager();
+    S.wrtc._userJoinedRoom=true;
     try{const tc=await window.electronAPI.getTurnCredentials?.();if(tc&&tc.url)S.wrtc.setTurnConfig(tc.url,tc.username,tc.credential);}catch{}
     setupW();
     const c=D.joinRoomCode.value.trim().toUpperCase();
@@ -4034,13 +4069,18 @@ async function joinRoom(){
       const r=await window.electronAPI.roomsJoin(c);
       if(!r||!r.ok){throw new Error(r?.error||'Комната не найдена');}
       S.wrtc.roomCode=c;
-      S.wrtc.myPeerId=S.settings?.profile?.userId||'local';
+      S.wrtc.myPeerId=S.settings?.profile?.serverId||S.settings?.profile?.id||'local';
       S.wrtc.setSignalingChannel((signalMsg)=>{
         window.electronAPI.presenceSend(JSON.stringify(signalMsg));
       });
       const roomData=r.data||{};
       const peerIds=roomData.members?roomData.members.filter(m=>m.userId!==S.wrtc.myPeerId).map(m=>m.userId):[];
+      // When joining an existing room, we are the initiator for our PeerConnections
+      // (we create data channel, send offer). The room creator will receive
+      // peer-joined notification and create their PC as joiner (isInitiator=false).
       for(const pid of peerIds){S.wrtc._createPeerConnection(pid,true);}
+      ensureAudioCtx();_rebuildCombinedStream();
+      _sendSourceStreamsToPeers();
       if(S.wrtc.onRoomJoined)S.wrtc.onRoomJoined(c,S.wrtc.myPeerId,peerIds);
       msg('Вы в комнате: '+c,'ok');
     }else{
@@ -4059,13 +4099,16 @@ function setupW(){
     S.co=new CoScene({log:(...a)=>{ if(window.__sbDev) console.log(...a); }});
     S.co.setHandlers({
       // Snapshot for handshake: send our own srcs (with stream stripped) + items.
-      // The receiver only USES the meta + our `msid` to attach the matching ontrack media.
+      // The receiver uses `msid` to attach the matching ontrack media.
+      // msid = the MediaStream id that the peer sees in ontrack (same as src.stream.id
+      // since we send original streams, not new MediaStream copies).
       getSnapshot:()=>({
         srcs:S.srcs.map(s=>({
           gid:s.id,ownerPeerId:s.ownerPeerId,type:s.type,name:s.name,
           isPeer:s.isPeer,peerId:s.peerId,
           visible:s.visible,locked:!!s.locked,vol:s.vol,muted:s.muted,
-          monitor:!!s.monitor,channelMode:s.channelMode||'auto',msid:s.msid||null,
+          monitor:!!s.monitor,channelMode:s.channelMode||'auto',
+          msid:s.stream?s.stream.id:(s.msid||null),
           camSettings:s.camSettings,fxState:s.fxState,
         })),
         items:S.items.map(it=>JSON.parse(JSON.stringify(it))),
@@ -4073,7 +4116,7 @@ function setupW(){
       }),
       applySrcAdd:(meta,pending,fromPid)=>_applyRemoteSrcAdd(meta,pending,fromPid),
       applySrcUpdate:(meta)=>_applyRemoteSrcUpdate(meta),
-      applySrcRemove:(gid)=>{ const s=S.srcs.find(x=>x.id===gid); if(s) rmSrc(gid); },
+      applySrcRemove:(gid)=>{ const s=S.srcs.find(x=>x.id===gid); if(s) rmSrc(gid,{fromRemote:true}); },
       applySrcReorder:(order)=>_applySrcReorder(order),
       applyItemUpsert:(it)=>_applyRemoteItemUpsert(it),
       applyItemRemove:(sid)=>{ S.items=S.items.filter(x=>x.sid!==sid); rebuildZ(); updateE(); },
@@ -4086,14 +4129,18 @@ function setupW(){
     if(S.co) S.co.setMyPeerId(S.myPeerId);
     D.roomCodeDisplay.style.display='block';D.roomCode.textContent=c;
     D.btnCreateRoom.textContent='Комната создана';D.btnCreateRoom.disabled=false;
+    _showActiveRoom(c);
     uRS('online','Комната: '+c);msg('Комната создана! '+c,'success');
+    _scheduleSettingsSave(); // persist roomCode for auto-rejoin
   };
   S.wrtc.onRoomJoined=c=>{
     S.roomCode=c;
     S.myPeerId=S.wrtc.myPeerId;
     if(S.co) S.co.setMyPeerId(S.myPeerId);
+    _showActiveRoom(c);
     uRS('online','Подключён: '+c);msg('Подключён','success');
     D.btnJoinRoom.textContent='Подключён';D.btnJoinRoom.disabled=false;
+    _scheduleSettingsSave(); // persist roomCode for auto-rejoin
   };
   S.wrtc.onPeerConnected=()=>msg('Друг подключился!','success');
   S.wrtc.onPeerDisconnected=pid=>{
@@ -4107,18 +4154,34 @@ function setupW(){
     S.items=S.items.filter(x=>S.srcs.some(s=>s.id===x.sid));
     if(S.co) S.co.detachPeer(pid);
     S.remoteCursors.delete(pid);
+    // Clean up dedup set for this peer's streams
+    for(const s of S.srcs){/* already removed above */}
+    // Note: _handledPeerStreams entries are per-stream.id, not per-peer,
+    // so we don't clear them here — they'll be garbage collected naturally
+    // when the stream ends.
     msg('Друг отключился','info');renderSources();renderMixer();updateE();
+  };
+  S.wrtc.onIceFailed=pid=>{
+    msg('Не удалось подключиться к другу. Проверьте интернет.','error');
   };
   // Wire co-session data channels as soon as they appear
   S.wrtc.onDataChannel=(dc,pid)=>{ if(S.co) S.co.attachChannel(pid,dc); };
   // Wire ontrack to bind incoming MediaStreams to gids (instead of auto-creating peer items)
   S.wrtc.onPeerTrack=(event,pid)=>_onPeerTrack(event,pid);
-  // Keep onRemoteStream as a fallback: when no src.add ever arrives (legacy peers), still create a default item.
-  S.wrtc.onRemoteStream=(st,pid,event)=>_handleRemoteStream(st,pid,event);
+  // When peer connections are ready (room-joined or peer-joined), send our source streams
+  S.wrtc.onPeerConnectionsReady=(peerIds)=>{
+    _p2pLog('[P2P] onPeerConnectionsReady — sending source streams to '+peerIds);
+    ensureAudioCtx();_rebuildCombinedStream();
+    _sendSourceStreamsToPeers();
+  };
+  // onRemoteStream is intentionally NOT wired — _onPeerTrack handles all
+  // incoming tracks. The legacy _handleRemoteStream created duplicates
+  // (both a CoScene source AND a fallback source for the same stream).
   S.wrtc.onError=m=>{
     D.connectError.textContent=m;D.connectError.style.display='block';
     D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;
     D.btnJoinRoom.textContent='Подключиться';D.btnJoinRoom.disabled=false;
+    _hideActiveRoom();
   };
 }
 
@@ -4127,9 +4190,28 @@ function setupW(){
 function _applyRemoteSrcAdd(meta,pending,fromPid){
   // Don't recreate if we already have it (snapshot replays etc.)
   if(S.srcs.some(s=>s.id===meta.gid)) return;
+  // Also check by msid — fallback may have already created a source for this stream
+  // before CoScene src.add arrived. In that case, update the existing source's gid
+  // instead of creating a duplicate.
+  if(meta.msid){
+    const existingByMsid=S.srcs.find(s=>s.msid===meta.msid);
+    if(existingByMsid){
+      if(window.__sbDev) console.log('[CoScene] src.add matched existing source by msid:',meta.gid,'→ existing id='+existingByMsid.id,'name='+existingByMsid.name);
+      // Update the existing source's gid to match the CoScene gid
+      // so future src.update/remove ops can find it
+      existingByMsid.id=meta.gid;
+      existingByMsid.gid=meta.gid;
+      // Also update name/type if different from fallback guess
+      if(meta.name&&meta.name!==existingByMsid.name) existingByMsid.name=meta.name;
+      if(meta.type&&meta.type!==existingByMsid.type) existingByMsid.type=meta.type;
+      renderSources();renderMixer();
+      return;
+    }
+  }
   // For OUR own gid (meta.ownerPeerId === our id) — never re-create (echo guard)
   if(meta.ownerPeerId&&meta.ownerPeerId===S.myPeerId) return;
-  // If incoming streams already arrived, attach them; otherwise create a "shadow" src.
+  // If incoming streams already arrived, attach them; otherwise stash the meta
+  // and wait for the matching ontrack to arrive (don't create a dead source with empty MediaStream).
   let videoStream=null,audioStream=null;
   if(pending&&Array.isArray(pending.streams)){
     for(const e of pending.streams){
@@ -4137,15 +4219,22 @@ function _applyRemoteSrcAdd(meta,pending,fromPid){
       if(e.kind==='audio'&&!audioStream) audioStream=e.stream;
     }
   }
-  // Use the original MediaStream (which carries both audio+video for screen share, or one kind for cam/mic)
-  const stream= (videoStream||audioStream) || null;
-  const opts={gid:meta.gid,ownerPeerId:meta.ownerPeerId,msid:meta.msid,suppressBroadcast:true};
+  // For audio-only sources (mic/desktop), prefer audioStream over videoStream
   const t=meta.type||'camera';
+  const stream=(t==='mic'||t==='desktop') ? (audioStream||videoStream) : (videoStream||audioStream);
+  // If no stream available yet, stash the src.add in CoScene's pending and wait for ontrack
+  if(!stream){
+    if(window.__sbDev) console.log('[CoScene] src.add without stream yet, stashing:',meta.gid,meta.type,'msid='+meta.msid);
+    if(S.co&&meta.msid){
+      S.co._pendingSrcByMsid.set(meta.msid,{srcMeta:meta,fromPid:fromPid||meta.ownerPeerId});
+    }
+    return;
+  }
+  const opts={gid:meta.gid,ownerPeerId:meta.ownerPeerId,msid:meta.msid,suppressBroadcast:true};
   if(t==='mic'||t==='desktop'){
-    // Audio-only source (e.g. friend's mic, friend's desktop audio incl. movie sound)
-    addAudioSource(t,meta.name||'Звук друга',stream||new MediaStream(),true,fromPid||meta.ownerPeerId,opts);
+    addAudioSource(t,meta.name||'Звук друга',stream,true,fromPid||meta.ownerPeerId,opts);
   }else{
-    addVideoSource(t,meta.name||'Камера друга',stream||new MediaStream(),true,fromPid||meta.ownerPeerId,opts);
+    addVideoSource(t,meta.name||'Камера друга',stream,true,fromPid||meta.ownerPeerId,opts);
   }
 }
 
@@ -4166,7 +4255,7 @@ function _applyRemoteSrcUpdate(meta){
     // Re-route audio chain if channel mode changed
     try{ _disconnectSource(s.id); _connectSource(s); _rebuildCombinedStream(); }catch(_){}
   }
-  if(meta.camSettings){ s.camSettings=Object.assign(s.camSettings||{},meta.camSettings); needRender=true; }
+  if(meta.camSettings){ /* camSettings are applied on the peer's side; we receive the processed video */ }
   if(meta.fxState){ Object.assign(s.fxState||(s.fxState={}),meta.fxState); needAudio=true; }
   if(needAudio) try{ _updateGain(s); }catch(_){}
   if(needRender){ try{ renderSources(); renderMixer(); updateE(); }catch(_){} }
@@ -4175,16 +4264,24 @@ function _applyRemoteSrcUpdate(meta){
 function _applyRemoteItemUpsert(remoteIt){
   const idx=S.items.findIndex(x=>x.sid===remoteIt.sid);
   if(idx>=0){
-    Object.assign(S.items[idx],remoteIt);
+    // Existing item — only patch non-visual fields.
+    // Each user controls their own layout for remote sources (position, size, crop, frames).
+    // We only sync: name, visible, z-order.
+    const it=S.items[idx];
+    if(remoteIt.name!==undefined) it.name=remoteIt.name;
+    if(remoteIt.visible!==undefined) it.visible=remoteIt.visible;
+    // z-order is local — don't override from remote
   }else{
-    // Item arrived before its src — keep it as a placeholder; it will start drawing
-    // once the matching `src.el` becomes ready.
+    // New item — create with local defaults. The source will appear at
+    // a default position/size and the user arranges it themselves.
+    // Use sensible defaults for a new remote source.
     S.items.push(Object.assign({
-      cx:0,cy:0,w:1,h:1,z:0,rot:0,flipH:false,flipV:false,
+      cx:0.5,cy:0.5,w:0.5,h:0.5,z:0,rot:0,flipH:false,flipV:false,
       crop:{l:0,t:0,r:0,b:0},cropMask:'none',
       frameSettings:JSON.parse(JSON.stringify(framePresets.none)),
-      uncropW:1,uncropH:1,uncropCx:0,uncropCy:0,
+      uncropW:1,uncropH:1,uncropCx:0.5,uncropCy:0.5,
       origVW:0,origVH:0,naturalAR:1,prevRect:null,panDx:0,panDy:0,
+      srcName:remoteIt.srcName||'',
     },remoteIt));
   }
   rebuildZ();updateE();
@@ -4209,29 +4306,109 @@ function _applySrcReorder(order){
 
 function _onPeerTrack(event,fromPid){
   const stream=event.streams&&event.streams[0];
-  if(!stream||!S.co) return;
+  if(!stream) return;
   const kind=event.track?event.track.kind:'';
-  // If we already created a src for this MediaStream (e.g. a previous track
-  // event triggered it), this is just an additional track (typical: screen
-  // share with both video+audio). Keep our existing audio chain in sync.
-  const existing=S.srcs.find(s=>s.msid===stream.id);
-  if(existing){
-    if(window.__sbDev) console.log('[CoScene] additional track for existing src',existing.id,kind);
-    // For additional audio tracks we need to re-wire the audio chain so the
-    // newly arrived audio actually plays / mixes.
-    if(kind==='audio'){
-      try{ _disconnectSource(existing.id); _connectSource(existing); _rebuildCombinedStream(); }catch(_){}
+  const trackState=event.track?{readyState:event.track.readyState,muted:event.track.muted,enabled:event.track.enabled}:{};
+  _p2pLog('[P2P] onPeerTrack: stream='+stream.id+' kind='+kind+' from='+fromPid+' trackState='+JSON.stringify(trackState)+' streamTracks='+stream.getTracks().length);
+
+  // Dedup: if we already processed this exact stream.id, this is just
+  // an additional track (audio arriving after video for the same stream).
+  if(S._handledPeerStreams.has(stream.id)){
+    _p2pLog('[P2P] dedup: additional track for stream '+stream.id+' '+kind);
+    // Find the existing source by msid and reconnect audio if needed
+    const existing=S.srcs.find(s=>s.msid===stream.id);
+    if(existing&&kind==='audio'){
+      // Add incoming audio track to existing video source's stream
+      try{
+        const audioTracks=stream.getAudioTracks();
+        for(const at of audioTracks){
+          if(!existing.stream.getAudioTracks().some(t=>t.id===at.id)){
+            existing.stream.addTrack(at);
+          }
+        }
+        _disconnectSource(existing.id); _connectSource(existing); _rebuildCombinedStream();
+      }catch(e){_p2pLog('[P2P] WARN: dedup reconnect failed: '+e.message);}
     }
     return;
   }
-  // Ask CoScene if we already have meta for this msid (came via data-channel earlier)
-  const r=S.co.bindIncomingStream(stream,kind,fromPid);
-  if(r){
-    if(window.__sbDev) console.log('[CoScene] track→src bound:',stream.id,r.srcMeta.gid);
-    const pending={streams:[{stream,kind,peerId:fromPid}]};
-    _applyRemoteSrcAdd(r.srcMeta,pending,r.fromPid||fromPid);
+  S._handledPeerStreams.add(stream.id);
+
+  // Renegotiate-induced rebind: WebRTC may deliver an existing logical track
+  // through a NEW MediaStream wrapper (different stream.id) when negotiation
+  // re-runs (peer removed/re-added a sender, or our own setStreams ran). If we
+  // already have a peer source from this same peerId+kind whose old stream has
+  // no live tracks, just rebind it to the new stream — DO NOT create a duplicate.
+  // This protects against the "Микрофон друга + Звук друга" duplicate.
+  try{
+    const peerSources=S.srcs.filter(s=>s.isPeer&&s.peerId===fromPid);
+    for(const ps of peerSources){
+      if(!ps.stream) continue;
+      // Match kind: video stream → video peer source, audio stream → audio peer source
+      const psKind=(ps.type==='peer-video'||ps.type==='camera'||ps.type==='screen'||ps.type==='window')?'video':'audio';
+      if(psKind!==kind) continue;
+      // Only rebind if old stream has no live tracks of this kind
+      const oldLive=ps.stream.getTracks().filter(t=>t.kind===kind&&t.readyState!=='ended');
+      if(oldLive.length>0) continue;
+      _p2pLog('[P2P] Rebinding peer source after renegotiate: '+ps.name+' (old msid='+ps.msid+' → new msid='+stream.id+')');
+      // Cancel any pending removetrack grace timer
+      if(ps._removetrackTimer){clearTimeout(ps._removetrackTimer);ps._removetrackTimer=null;}
+      // Update msid and stream reference
+      if(ps.msid) S._handledPeerStreams.delete(ps.msid);
+      ps.stream=stream;
+      ps.msid=stream.id;
+      ps._trackHandlersWired=false; // allow re-wiring for new stream
+      _disconnectSource(ps.id); _connectSource(ps); _rebuildCombinedStream();
+      _wireTrackEndHandlers(ps);
+      renderMixer();updateE();_markDirty();
+      return;
+    }
+  }catch(e){_p2pLog('[P2P] WARN: rebind check failed: '+e.message);}
+
+  // Try CoScene binding first — if src.add already arrived via data-channel,
+  // we can match this track to the correct source by msid.
+  if(S.co){
+    const r=S.co.bindIncomingStream(stream,kind,fromPid);
+    if(r){
+      if(window.__sbDev) console.log('[CoScene] track→src bound:',stream.id,r.srcMeta.gid);
+      const pending={streams:[{stream,kind,peerId:fromPid}]};
+      _applyRemoteSrcAdd(r.srcMeta,pending,r.fromPid||fromPid);
+      return;
+    }
   }
-  // Otherwise the track is parked in pending; src.add will pick it up
+  // Fallback: no CoScene match yet — stash this stream and wait for src.add
+  // to arrive over data-channel (typically within 200-400ms).
+  // If it doesn't arrive, create a default source after a grace period.
+  _p2pLog('[P2P] No CoScene match yet, stashing stream '+stream.id+' '+kind+' from '+fromPid);
+  // Store pending stream for CoScene to pick up later
+  if(S.co){
+    const list=S.co._pendingTracksByMsid.get(stream.id)||{streams:[]};
+    list.streams.push({stream,kind,peerId:fromPid});
+    list.peerId=fromPid;
+    S.co._pendingTracksByMsid.set(stream.id,list);
+  }
+  // Grace period: if no src.add arrives within 1.5s, create a default source
+  setTimeout(()=>{
+    // Check if CoScene already handled it
+    if(S.srcs.some(s=>s.msid===stream.id)) return;
+    _p2pLog('[P2P] Grace expired, creating fallback source for stream '+stream.id+' '+kind);
+    // IMPORTANT: pass the original WebRTC stream directly — do NOT create
+    // new MediaStream from extracted tracks, that breaks audio decoding.
+    try{
+    if(kind==='video'){
+      addVideoSource('peer-video','Камера друга',stream,true,fromPid,{msid:stream.id});
+    }else if(kind==='audio'){
+      // Try to guess type: if stream also has video tracks → likely desktop audio
+      const hasVideo=stream.getVideoTracks().length>0;
+      // Count existing peer audio sources from this peer
+      const peerAudioCount=S.srcs.filter(s=>s.isPeer&&s.peerId===fromPid&&(s.type==='mic'||s.type==='desktop')).length;
+      // Heuristic: first audio from peer = mic, second = desktop
+      const srcType=hasVideo?'desktop':(peerAudioCount>0?'desktop':'mic');
+      const srcName=hasVideo?'Звук друга':(peerAudioCount>0?'Звук друга':'Микрофон друга');
+      _p2pLog('[P2P] Fallback audio type guess: hasVideo='+hasVideo+' peerAudioCount='+peerAudioCount+' → '+srcType+' / '+srcName);
+      addAudioSource(srcType,srcName,stream,true,fromPid,{msid:stream.id});
+    }
+    }catch(e){_p2pLog('[P2P] WARN: Fallback source creation failed: '+e.message);}
+  },2500);
 }
 
 // Legacy fallback: for older peers without coscene OR if the protocol stalls.
@@ -4255,6 +4432,182 @@ function _handleRemoteStream(st,pid,event){
 }
 function uRS(s,t){D.roomStatus.querySelector('.status-dot').className='status-dot '+s;D.roomStatus.querySelector('.status-text').textContent=t;}
 function copyCode(){if(!S.roomCode)return;navigator.clipboard.writeText(S.roomCode).then(()=>{msg('Код скопирован!','success');D.btnCopyCode.textContent='Скопировано!';setTimeout(()=>D.btnCopyCode.textContent='Скопировать код',2000);}).catch(()=>msg('Код: '+S.roomCode,'info'));}
+
+// ─── My Rooms ──────────────────────────────────────────────
+function _showActiveRoom(code){
+  if(D.btnLeaveRoomTop)D.btnLeaveRoomTop.style.display='inline-flex';
+  const expBtn=document.getElementById('btnExportP2pLog');
+  if(expBtn) expBtn.style.display='inline-flex';
+}
+function _hideActiveRoom(){
+  if(D.btnLeaveRoomTop)D.btnLeaveRoomTop.style.display='none';
+  const expBtn=document.getElementById('btnExportP2pLog');
+  if(expBtn) expBtn.style.display='none';
+  S.roomCode=null;
+  _scheduleSettingsSave(); // persist roomCode=null so auto-rejoin doesn't fire on restart
+}
+async function _exportP2pLog(){
+  const header='StreamBro P2P Debug Log\n'+
+    'Version: '+navigator.userAgent.match(/StreamBro\/([\d.]+)/)?.[1]+' (1.4.0-beta11)\n'+
+    'Date: '+new Date().toISOString()+'\n'+
+    'Room: '+(S.roomCode||'none')+'\n'+
+    'Sources: '+S.srcs.map(s=>s.name+'('+s.type+(s.isPeer?',peer':'')+')').join(', ')+'\n'+
+    '---\n';
+  const log=header+(window._sbP2pLog||S._p2pLog||[]).join('\n');
+  const r=await window.electronAPI.saveP2pLog(log);
+  if(r&&r.success) msg('Лог сохранён: '+r.path,'success');
+  else msg('Ошибка: '+(r?.error||'не удалось сохранить'),'error');
+}
+async function loadMyRooms(){
+  const el=D.myRoomsList;if(!el)return;
+  el.innerHTML='<div style="color:var(--muted);text-align:center;padding:20px">Загрузка...</div>';
+  try{
+    const r=await window.electronAPI.roomsList();
+    if(!r||!r.ok){
+      const reason=r?.error||'неизвестная ошибка';
+      el.innerHTML=`<div style="color:var(--muted);text-align:center;padding:20px">${_esc(reason)}</div>`;
+      return;
+    }
+    const rooms=r.data||[];
+    if(!rooms.length){el.innerHTML='<div style="color:var(--muted);text-align:center;padding:20px">Нет активных комнат.<br>Создайте новую на вкладке «Создать».</div>';return;}
+    el.innerHTML=`<div style="color:var(--text2);font-size:11px;margin-bottom:8px">Ваши комнаты (${rooms.length}/2)</div>`+rooms.map(rm=>{
+      const isCurrentRoom=S.roomCode===rm.code;
+      const members=(rm.members||[]).length||1;
+      const name=rm.name||rm.code;
+      return `<div class="my-room-card${isCurrentRoom?' my-room-current':''}" data-code="${rm.code}">
+        <div class="my-room-info">
+          <div class="my-room-name">${_esc(name)}${isCurrentRoom?' <span style="color:var(--accent);font-size:10px">● текущая</span>':''}</div>
+          <div class="my-room-meta"><span style="color:var(--accent)">Создатель</span></div>
+        </div>
+        <div class="my-room-actions">
+          <button class="btn sm" data-action="copy" data-code="${rm.code}">Скопировать код</button>
+          ${isCurrentRoom?`<button class="btn sm btn-danger" data-action="leave" data-code="${rm.code}">Покинуть</button>`:`<button class="btn sm" data-action="rejoin" data-code="${rm.code}">Войти</button>`}
+          <button class="btn sm" data-action="rename" data-code="${rm.code}" data-name="${_esc(rm.name||'')}">✏️</button>
+          <button class="btn sm btn-danger" data-action="delete" data-code="${rm.code}">🗑</button>
+        </div>
+      </div>`;
+    }).join('');
+    // Wire action buttons
+    el.querySelectorAll('[data-action]').forEach(btn=>{
+      btn.onclick=async()=>{
+        const action=btn.dataset.action;
+        const code=btn.dataset.code;
+        if(action==='copy'){navigator.clipboard.writeText(code).then(()=>{btn.textContent='Скопировано!';setTimeout(()=>btn.textContent='Скопировать код',1500);}).catch(()=>msg('Код: '+code,'info'));}
+        else if(action==='rejoin') {_rejoinRoom(code);}
+        else if(action==='leave') {await leaveCurrentRoom();loadMyRooms();}
+        else if(action==='rename') {_renameRoomPrompt(code,btn.dataset.name);}
+        else if(action==='delete') {_deleteRoomPrompt(code);}
+      };
+    });
+  }catch(e){
+    el.innerHTML='<div style="color:var(--muted);text-align:center;padding:20px">Ошибка загрузки</div>';
+  }
+}
+
+async function _rejoinRoom(code){
+  if(S.roomCode===code&&S.wrtc){msg('Вы уже в этой комнате','info');return;}
+  // Leave current room first if in one
+  if(S.roomCode) await leaveCurrentRoom();
+  D.joinRoomCode.value=code;
+  await joinRoom();
+}
+
+function _renameRoomPrompt(code,currentName){
+  // Find the rename button and replace with inline input
+  const card=document.querySelector(`.my-room-card[data-code="${code}"]`);
+  if(!card)return;
+  const actionsEl=card.querySelector('.my-room-actions');
+  if(!actionsEl||actionsEl.querySelector('.rename-input'))return;
+  const input=document.createElement('input');
+  input.type='text';input.className='rename-input';input.value=currentName||'';
+  input.placeholder='Название';input.maxLength=50;
+  input.style.cssText='width:100px;font-size:12px;padding:3px 6px;border:1px solid var(--accent);border-radius:4px;background:var(--bg1);color:var(--text)';
+  const okBtn=document.createElement('button');okBtn.className='btn sm';okBtn.textContent='OK';
+  const cancelBtn=document.createElement('button');okBtn.className='btn sm';cancelBtn.textContent='✕';
+  cancelBtn.style.cssText='color:var(--muted)';
+  // Hide existing buttons, show input
+  const existing=actionsEl.querySelectorAll('.btn');
+  existing.forEach(b=>b.style.display='none');
+  actionsEl.prepend(input,okBtn,cancelBtn);
+  input.focus();input.select();
+  const finish=(save)=>{
+    if(save&&input.value.trim()&&input.value.trim()!==currentName){
+      window.electronAPI.roomsRename(code,input.value.trim()).then(r=>{
+        if(r&&r.ok){msg('Комната переименована','success');loadMyRooms();}
+        else{msg(r?.error||'Ошибка переименования','error');loadMyRooms();}
+      }).catch(()=>{msg('Ошибка переименования','error');loadMyRooms();});
+    }else{loadMyRooms();}
+  };
+  okBtn.onclick=()=>finish(true);
+  cancelBtn.onclick=()=>finish(false);
+  input.onkeydown=e=>{if(e.key==='Enter')finish(true);if(e.key==='Escape')finish(false);};
+}
+
+function _deleteRoomPrompt(code){
+  // Use a simple custom confirm approach
+  const card=document.querySelector(`.my-room-card[data-code="${code}"]`);
+  if(!card||card.dataset.deleting)return;
+  card.dataset.deleting='1';
+  const actionsEl=card.querySelector('.my-room-actions');
+  if(!actionsEl)return;
+  const existing=actionsEl.querySelectorAll('.btn');
+  existing.forEach(b=>b.style.display='none');
+  const warn=document.createElement('span');warn.style.cssText='font-size:11px;color:#ef4444;margin-right:4px';warn.textContent='Удалить?';
+  const yesBtn=document.createElement('button');yesBtn.className='btn sm btn-danger';yesBtn.textContent='Да';
+  const noBtn=document.createElement('button');noBtn.className='btn sm';noBtn.textContent='Нет';
+  actionsEl.prepend(warn,yesBtn,noBtn);
+  const finish=(del)=>{
+    if(del){
+      window.electronAPI.roomsDelete(code).then(r=>{
+        if(r&&r.ok){msg('Комната удалена','success');if(S.roomCode===code)_hideActiveRoom();loadMyRooms();}
+        else{msg(r?.error||'Ошибка удаления','error');loadMyRooms();}
+      }).catch(()=>{msg('Ошибка удаления','error');loadMyRooms();});
+    }else{delete card.dataset.deleting;loadMyRooms();}
+  };
+  yesBtn.onclick=()=>finish(true);
+  noBtn.onclick=()=>finish(false);
+}
+
+async function leaveCurrentRoom(){
+  if(!S.roomCode)return;
+  const code=S.roomCode;
+  // Check if user is the creator — creators keep the room alive when disconnecting
+  let isCreator=false;
+  try{
+    const info=await window.electronAPI.roomsGet(code);
+    if(info&&info.ok&&info.data){
+      isCreator=info.data.creatorId===(S.settings?.profile?.serverId||'');
+    }
+  }catch{}
+  // Only call server leave for non-creators (creators just disconnect WebRTC)
+  if(!isCreator){
+    try{await window.electronAPI.roomsLeave(code);}catch{}
+  }
+  // Clean up WebRTC
+  if(S.wrtc){
+    try{S.wrtc.disconnect();}catch(_){}
+    S.wrtc=null;
+  }
+  // Remove peer sources
+  S.srcs=S.srcs.filter(s=>{
+    if(s.isPeer){if(s.stream)s.stream.getTracks().forEach(t=>{try{t.stop();}catch(_){}});_disconnectSource(s.id);return false;}
+    return true;
+  });
+  S.items=S.items.filter(x=>S.srcs.some(s=>s.id===x.sid));
+  if(S.co){S.co=null;}
+  S.remoteCursors.clear();
+  if(S._handledPeerStreams) S._handledPeerStreams.clear();
+  _hideActiveRoom();
+  uRS('offline','Не подключён');
+  D.roomCodeDisplay.style.display='none';
+  D.btnCreateRoom.textContent='Создать комнату';D.btnCreateRoom.disabled=false;
+  D.btnJoinRoom.textContent='Подключиться';D.btnJoinRoom.disabled=false;
+  D.connectedPeersCreate.innerHTML='';D.connectedPeersJoin.innerHTML='';
+  renderSources();renderMixer();updateE();
+  msg(isCreator?'Вы отключились от комнаты (комната осталась активной)':'Вы покинули комнату','info');
+}
+
+function _esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
 // ═══════════════════════════════════════════════════════════════
 //  1.1.0 — sounds, profile, friends, updates, bug capture
@@ -4304,14 +4657,189 @@ function _initSoundSystem() {
 async function _initProfileAndFriends() {
   try { if (window.SBProfile) await window.SBProfile.boot(); } catch (e) { console.warn('[Profile] boot failed', e); }
   try { if (window.SBFriends) await window.SBFriends.boot(); } catch (e) { console.warn('[Friends] boot failed', e); }
-  // Sync friends from server if logged in
-  if (window.electronAPI && window.electronAPI.friendsSync) {
-    try { await window.electronAPI.friendsSync(); } catch (e) { if(window.__sbDev) console.warn('[Friends] sync failed', e); }
-  }
   // Auto-connect to Presence WS if logged in (for signaling + presence + chat)
   if (window.electronAPI && window.electronAPI.presenceConnect) {
     try { await window.electronAPI.presenceConnect(); } catch (e) { if(window.__sbDev) console.warn('[Presence] auto-connect failed', e); }
   }
+  // Auto-rejoin P2P room if roomCode was saved before restart
+  _autoRejoinRoom();
+}
+
+function _initNetworkMonitor() {
+  const el = document.getElementById('netStatus');
+  const dot = document.getElementById('netDot');
+  const txt = document.getElementById('netText');
+  if (!el || !dot || !txt) return;
+
+  let _online = navigator.onLine;
+  let _weak = false;
+  let _failCount = 0;     // consecutive probe failures
+  let _checkTimer = null;
+
+  function _update() {
+    el.classList.remove('net-offline', 'net-weak');
+    if (!_online) {
+      el.classList.add('net-offline');
+      dot.className = 'net-dot';
+      txt.textContent = 'Нет сети';
+    } else if (_weak) {
+      el.classList.add('net-weak');
+      dot.className = 'net-dot';
+      txt.textContent = 'Слабая сеть';
+    } else {
+      dot.className = 'net-dot';
+      txt.textContent = 'В сети';
+    }
+  }
+
+  function _probe() {
+    // Lightweight health check to detect captive portals / real connectivity.
+    // Use 'cors' mode (not 'no-cors') — opaque responses always resolve even when
+    // the server is down, making the probe useless. The health endpoint is public
+    // and returns CORS headers. Timeout = 4s.
+    const url = 'https://streambro.ru/api/health?t=' + Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    fetch(url, { mode: 'cors', cache: 'no-store', signal: controller.signal })
+      .then(() => {
+        // Any HTTP response (even 5xx) means the server is reachable
+        _failCount = 0;
+        _weak = false;
+        _update();
+      })
+      .catch(() => {
+        // navigator.onLine can be true even when only local network is available
+        if (navigator.onLine) {
+          _failCount++;
+          // Require 2+ consecutive failures before showing "weak" — prevents
+          // false positives from a single timeout / server hiccup
+          if (_failCount >= 2) { _weak = true; _update(); }
+        }
+      })
+      .finally(() => clearTimeout(timeout));
+  }
+
+  window.addEventListener('online', () => {
+    _online = true;
+    _weak = false;
+    _failCount = 0;
+    _update();
+    _probe(); // verify real connectivity
+    if (window.__sbDev) console.log('[Net] online');
+  });
+
+  window.addEventListener('offline', () => {
+    _online = false;
+    _weak = false;
+    _failCount = 0;
+    _update();
+    if (window.__sbDev) console.log('[Net] offline');
+  });
+
+  // Periodic probe every 30s to detect silent disconnects
+  _checkTimer = setInterval(_probe, 30000);
+
+  // Initial state + probe
+  _update();
+  if (_online) _probe();
+}
+
+function _initSidebarResize(){
+  const handle=document.getElementById('sidebarResize');
+  const sidebar=document.getElementById('sidebar');
+  if(!handle||!sidebar) return;
+
+  const MIN_W=240,MAX_W=500;
+  let dragging=false,startX=0,startW=0;
+
+  // Restore saved width
+  const saved=S.settings&&S.settings._sidebarWidth;
+  if(saved&&saved>=MIN_W&&saved<=MAX_W){
+    sidebar.style.width=saved+'px';
+    document.documentElement.style.setProperty('--sidebar-w',saved+'px');
+  }
+
+  handle.addEventListener('mousedown',e=>{
+    e.preventDefault();
+    dragging=true;
+    startX=e.clientX;
+    startW=sidebar.offsetWidth;
+    handle.classList.add('active');
+    document.body.style.cursor='col-resize';
+    document.body.style.userSelect='none';
+  });
+
+  document.addEventListener('mousemove',e=>{
+    if(!dragging) return;
+    // Sidebar is on the right — dragging left increases width
+    const delta=startX-e.clientX;
+    const newW=Math.min(MAX_W,Math.max(MIN_W,startW+delta));
+    sidebar.style.width=newW+'px';
+    document.documentElement.style.setProperty('--sidebar-w',newW+'px');
+  });
+
+  document.addEventListener('mouseup',()=>{
+    if(!dragging) return;
+    dragging=false;
+    handle.classList.remove('active');
+    document.body.style.cursor='';
+    document.body.style.userSelect='';
+    // Persist
+    const w=sidebar.offsetWidth;
+    if(!S.settings) S.settings={};
+    S.settings._sidebarWidth=w;
+    _scheduleSettingsSave();
+    _markDirty();
+  });
+}
+
+function _initBottomResize(){
+  const handle=document.getElementById('bottomResize');
+  const panel=document.getElementById('bottomPanel');
+  if(!handle||!panel) return;
+
+  const MIN_H=100,MAX_H=450;
+  let dragging=false,startY=0,startH=0;
+
+  // Restore saved height
+  const saved=S.settings&&S.settings._bottomHeight;
+  if(saved&&saved>=MIN_H&&saved<=MAX_H){
+    panel.style.height=saved+'px';
+    document.documentElement.style.setProperty('--bottom-h',saved+'px');
+  }
+
+  handle.addEventListener('mousedown',e=>{
+    e.preventDefault();
+    dragging=true;
+    startY=e.clientY;
+    startH=panel.offsetHeight;
+    handle.classList.add('active');
+    document.body.style.cursor='row-resize';
+    document.body.style.userSelect='none';
+  });
+
+  document.addEventListener('mousemove',e=>{
+    if(!dragging) return;
+    // Bottom panel — dragging up increases height
+    const delta=startY-e.clientY;
+    const newH=Math.min(MAX_H,Math.max(MIN_H,startH+delta));
+    panel.style.height=newH+'px';
+    document.documentElement.style.setProperty('--bottom-h',newH+'px');
+  });
+
+  document.addEventListener('mouseup',()=>{
+    if(!dragging) return;
+    dragging=false;
+    handle.classList.remove('active');
+    document.body.style.cursor='';
+    document.body.style.userSelect='';
+    // Persist
+    const h=panel.offsetHeight;
+    if(!S.settings) S.settings={};
+    S.settings._bottomHeight=h;
+    _scheduleSettingsSave();
+    _markDirty();
+  });
 }
 
 function _initSettingsTabs() {

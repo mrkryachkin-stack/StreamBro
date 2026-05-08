@@ -131,6 +131,10 @@ async function chatUnread() {
   return _request('GET', '/chat/unread/count');
 }
 
+async function chatUnreadBySender() {
+  return _request('GET', '/chat/unread/by-sender');
+}
+
 // ─── Rooms ───
 async function roomsCreate(opts) {
   return _request('POST', '/rooms', opts || {});
@@ -154,6 +158,14 @@ async function roomsList() {
 
 async function roomsInvite(code, friendId) {
   return _request('POST', `/rooms/${code}/invite`, { friendId });
+}
+
+async function roomsRename(code, name) {
+  return _request('PATCH', `/rooms/${code}`, { name });
+}
+
+async function roomsDelete(code) {
+  return _request('DELETE', `/rooms/${code}`);
 }
 
 // ─── Stream Events ───
@@ -225,6 +237,12 @@ function presenceConnect() {
   _presenceWs.on('open', () => {
     _presenceWs.send(JSON.stringify({ type: 'auth', token }));
     console.log('[Presence] Connected and authenticating');
+    // Notify renderer that presence reconnected — it should refresh friend statuses
+    try {
+      const { BrowserWindow } = require('electron');
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win && !win.isDestroyed()) win.webContents.send('presence-reconnect');
+    } catch (e) {}
   });
 
   _presenceWs.on('message', (raw) => {
@@ -395,8 +413,8 @@ async function getTurnCredentials() {
 
 module.exports = {
   friendsList, friendsPending, friendsSearch, friendsRequest, friendsAccept, friendsReject, friendsRemove, friendsBlock,
-  chatHistory, chatSend, chatEdit, chatDelete, chatUnread,
-  roomsCreate, roomsJoin, roomsLeave, roomsGet, roomsList, roomsInvite,
+  chatHistory, chatSend, chatEdit, chatDelete, chatUnread, chatUnreadBySender,
+  roomsCreate, roomsJoin, roomsLeave, roomsGet, roomsList, roomsInvite, roomsRename, roomsDelete,
   streamEventStart, streamEventEnd, streamEventReconnect, streamEventHistory, streamEventStats,
   cloudSettingsGet, cloudSettingsPut, cloudSettingsDelete,
   profileUpdate, profileGetPublic, userMe, changePassword,

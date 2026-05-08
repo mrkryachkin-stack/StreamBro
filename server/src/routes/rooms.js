@@ -2,12 +2,24 @@ const express = require("express");
 const router = express.Router();
 const { authMiddleware } = require("../middleware/auth");
 
+// Presence server reference — set from index.js
+let _presence = null;
+function setPresence(presenceServer) { _presence = presenceServer; }
+
 // ─── POST /api/rooms ──────────────────────────────────────
 // Create a co-stream room
 router.post("/", authMiddleware, async (req, res) => {
   const { name, maxPeers } = req.body;
 
   try {
+    // Limit: max 2 active rooms per user
+    const activeCount = await req.prisma.room.count({
+      where: { creatorId: req.user.id, status: "ACTIVE" },
+    });
+    if (activeCount >= 2) {
+      return res.status(429).json({ error: "Максимум 2 комнаты. Удалите старую чтобы создать новую." });
+    }
+
     const code = generateRoomCode();
 
     const room = await req.prisma.room.create({
@@ -29,6 +41,32 @@ router.post("/", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("[ROOMS] Create error:", err);
     res.status(500).json({ error: "Ошибка создания комнаты" });
+  }
+});
+
+// ─── GET /api/rooms/mine/list ──────────────────────────────
+// List rooms the user created (ACTIVE only, max 2 per user)
+router.get("/mine/list", authMiddleware, async (req, res) => {
+  try {
+    const rooms = await req.prisma.room.findMany({
+      where: {
+        creatorId: req.user.id,
+        status: "ACTIVE",
+      },
+      include: {
+        creator: { select: { id: true, username: true, displayName: true } },
+        members: {
+          where: { leftAt: null },
+          select: { userId: true, role: true, joinedAt: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(rooms);
+  } catch (err) {
+    console.error("[ROOMS] Mine error:", err);
+    res.status(500).json({ error: "Ошибка получения комнат" });
   }
 });
 
@@ -79,6 +117,21 @@ router.post("/:code/join", authMiddleware, async (req, res) => {
       data: { roomId: room.id, userId: req.user.id },
     });
 
+    // Notify existing room members that a peer joined
+    if (_presence) {
+      for (const m of room.members) {
+        if (m.userId !== req.user.id) {
+          _presence.notifyUser(m.userId, {
+            type: "room-event",
+            roomCode: code,
+            event: "peer-joined",
+            fromUserId: req.user.id,
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
+
     // Return updated room
     const updated = await req.prisma.room.findUnique({
       where: { code },
@@ -126,34 +179,6 @@ router.post("/:code/leave", authMiddleware, async (req, res) => {
   }
 });
 
-// ─── GET /api/rooms/mine/list ──────────────────────────────
-// List rooms the user is in
-router.get("/mine/list", authMiddleware, async (req, res) => {
-  try {
-    const rooms = await req.prisma.room.findMany({
-      where: {
-        members: {
-          some: { userId: req.user.id, leftAt: null },
-        },
-        status: "ACTIVE",
-      },
-      include: {
-        creator: { select: { id: true, username: true, displayName: true } },
-        members: {
-          where: { leftAt: null },
-          select: { userId: true, role: true, joinedAt: true },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    res.json(rooms);
-  } catch (err) {
-    console.error("[ROOMS] Mine error:", err);
-    res.status(500).json({ error: "Ошибка получения комнат" });
-  }
-});
-
 // ─── POST /api/rooms/:code/invite ──────────────────────────
 // Invite a friend to a room (sends message)
 router.post("/:code/invite", authMiddleware, async (req, res) => {
@@ -192,6 +217,60 @@ router.post("/:code/invite", authMiddleware, async (req, res) => {
   }
 });
 
+// ─── PATCH /api/rooms/:code ────────────────────────────────
+// Rename a room (creator only)
+router.patch("/:code", authMiddleware, async (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const { name } = req.body;
+
+  if (name !== undefined && typeof name !== "string") return res.status(400).json({ error: "name must be a string" });
+  if (name !== undefined && name.length > 50) return res.status(400).json({ error: "name max 50 chars" });
+
+  try {
+    const room = await req.prisma.room.findUnique({ where: { code } });
+    if (!room) return res.status(404).json({ error: "Комната не найдена" });
+    if (room.creatorId !== req.user.id) return res.status(403).json({ error: "Только создатель может переименовать" });
+    if (room.status !== "ACTIVE") return res.status(410).json({ error: "Комната закрыта" });
+
+    const updated = await req.prisma.room.update({
+      where: { id: room.id },
+      data: { name: name !== undefined ? name : room.name },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("[ROOMS] Rename error:", err);
+    res.status(500).json({ error: "Ошибка переименования" });
+  }
+});
+
+// ─── DELETE /api/rooms/:code ────────────────────────────────
+// Delete/close a room (creator only)
+router.delete("/:code", authMiddleware, async (req, res) => {
+  const code = req.params.code.toUpperCase();
+
+  try {
+    const room = await req.prisma.room.findUnique({ where: { code } });
+    if (!room) return res.status(404).json({ error: "Комната не найдена" });
+    if (room.creatorId !== req.user.id) return res.status(403).json({ error: "Только создатель может удалить" });
+
+    // Mark all members as left and close the room
+    await req.prisma.roomMember.updateMany({
+      where: { roomId: room.id, leftAt: null },
+      data: { leftAt: new Date() },
+    });
+    await req.prisma.room.update({
+      where: { id: room.id },
+      data: { status: "CLOSED" },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[ROOMS] Delete error:", err);
+    res.status(500).json({ error: "Ошибка удаления" });
+  }
+});
+
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
@@ -205,3 +284,4 @@ function generateRoomCode() {
 }
 
 module.exports = router;
+module.exports.setPresence = setPresence;

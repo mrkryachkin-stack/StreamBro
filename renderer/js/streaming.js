@@ -51,3 +51,15 @@ window.SBStreaming = (() => {
     autoFixCustomUrl,
   };
 })();
+
+// ─── P2P Debug Log — global stub, initialized by app.js ───
+// webrtc.js / audio.js call _p2pLog() which is defined in app.js (loaded later).
+// This stub prevents "not defined" errors during initial parse.
+window._sbP2pLog = [];
+window._p2pLog = function(msg) {
+  const ts = new Date().toISOString().substr(11, 12);
+  const entry = '[' + ts + '] ' + msg;
+  window._sbP2pLog.push(entry);
+  if (window._sbP2pLog.length > 5000) window._sbP2pLog.splice(0, window._sbP2pLog.length - 5000);
+  if (window.__sbDev) console.log(entry);
+};

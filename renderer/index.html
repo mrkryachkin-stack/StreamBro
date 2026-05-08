@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,12 +9,13 @@
                  media-src 'self' blob: mediastream:;
                  style-src 'self' 'unsafe-inline';
                  script-src 'self';
-                 connect-src 'self' ws: wss: blob:;
+                 connect-src 'self' ws: wss: https: blob:;
                  font-src 'self';
                  object-src 'none';
                  base-uri 'self';
                  frame-src 'none';">
   <title>StreamBro</title>
+  <script src="js/theme-early.js"></script>
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -25,9 +26,15 @@
         <span class="logo-text">StreamBro</span>
       </div>
       <div class="top-bar-center">
+        <div class="net-status" id="netStatus" title="Подключение к интернету">
+          <span class="net-dot" id="netDot"></span>
+          <span class="net-text" id="netText">—</span>
+        </div>
         <div class="room-status" id="roomStatus">
           <span class="status-dot offline"></span>
           <span class="status-text">Не подключён</span>
+          <button class="btn sm btn-leave-room" id="btnLeaveRoomTop" style="display:none;margin-left:6px" title="Покинуть комнату">Покинуть</button>
+          <button class="btn sm" id="btnExportP2pLog" style="display:none;margin-left:6px;font-size:11px" title="Сохранить P2P лог на рабочий стол">📋 Лог</button>
         </div>
         <div class="stream-status stream-pill" id="streamStatusPill" title="Статус стрима">
           <span class="status-dot offline" id="streamStatusDot"></span>
@@ -64,7 +71,8 @@
         </div>
       </div>
 
-      <aside class="sidebar">
+      <div class="sidebar-resize" id="sidebarResize"></div>
+      <aside class="sidebar" id="sidebar">
         <div class="accordion-item open" id="accPlatforms">
           <button class="accordion-header" data-acc="accPlatforms"><span>Платформы</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg></button>
           <div class="accordion-body">
@@ -121,7 +129,8 @@
       </aside>
     </main>
 
-    <footer class="bottom-panel">
+    <div class="bottom-resize" id="bottomResize"></div>
+    <footer class="bottom-panel" id="bottomPanel">
       <div class="bottom-section sources-section">
         <div class="bottom-header"><h3>Источники</h3><button class="btn-icon" id="btnAddSource" title="Добавить"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>
         <div class="sources-list" id="sourcesList"></div>
@@ -139,26 +148,41 @@
         </div>
         <div class="audio-mixer" id="audioMixer"></div>
       </div>
+      <div class="bottom-sep"></div>
+      <div class="bottom-section scenes-section">
+        <div class="bottom-header">
+          <h3>Сцены <span class="hint-toggle" data-hint="Сохраняйте раскладку источников с настройками и загружайте обратно. Полезно для быстрого переключения между форматами стрима.">?</span></h3>
+          <button class="btn-icon" id="scenePresetSaveBtn" title="Сохранить текущую сцену"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>
+        </div>
+        <div class="scenes-list" id="scenePresetsList"></div>
+        <div class="scenes-save-row">
+          <input type="text" id="scenePresetNameInput" placeholder="Имя..." maxlength="20"/>
+        </div>
+      </div>
     </footer>
 
     <!-- Connect Modal -->
     <div class="modal-overlay" id="connectModal" style="display:none">
-      <div class="modal glass">
+      <div class="modal glass" style="max-width:520px">
         <div class="modal-header"><h2>Совместный стрим</h2><button class="btn-icon" id="btnCloseConnectModal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
         <div class="modal-body">
           <p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem">Подключитесь через наш сервер — работает из любой сети, без настроек.</p>
-          <div class="connect-tabs"><button class="tab-btn active" data-tab="create">Создать комнату</button><button class="tab-btn" data-tab="join">Присоединиться</button></div>
+          <div class="connect-tabs"><button class="tab-btn active" data-tab="create">Создать</button><button class="tab-btn" data-tab="join">Войти по коду</button><button class="tab-btn" data-tab="myrooms">Мои комнаты</button></div>
           <div class="tab-content active" id="tabCreate">
             <p class="tab-desc">Создайте комнату и отправьте код другу.</p>
+            <div class="form-group"><label>Название (необязательно)</label><input type="text" id="roomNameInput" placeholder="Моя комната" maxlength="50" class="input"/></div>
             <div class="room-code-display" id="roomCodeDisplay" style="display:none"><label>Код комнаты:</label><div class="room-code" id="roomCode">----</div><button class="btn" id="btnCopyCode">Скопировать код</button></div>
             <button class="btn btn-accent block" id="btnCreateRoom">Создать комнату</button>
             <div class="connected-peers" id="connectedPeersCreate"></div>
           </div>
           <div class="tab-content" id="tabJoin">
             <p class="tab-desc">Введите код комнаты от друга.</p>
-            <div class="form-group"><label>Код комнаты</label><input type="text" id="joinRoomCode" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="19" class="room-code-input"/></div>
+            <div class="form-group"><label>Код комнаты</label><div style="display:flex;gap:6px"><input type="text" id="joinRoomCode" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="19" class="room-code-input" style="flex:1"/><button class="btn sm" id="btnPasteCode" title="Вставить из буфера">Вставить</button></div></div>
             <button class="btn btn-accent block" id="btnJoinRoom">Подключиться</button>
             <div class="connected-peers" id="connectedPeersJoin"></div>
+          </div>
+          <div class="tab-content" id="tabMyRooms">
+            <div id="myRoomsList" style="min-height:60px;max-height:50vh;overflow-y:auto"></div>
           </div>
           <div class="error-msg" id="connectError" style="display:none"></div>
           <!-- Hidden: TURN config auto-fetched from server -->
@@ -377,6 +401,7 @@
           <p>1. Добавьте источники — камера, экран, окно или изображение.</p>
           <p>2. Настройте сцену — перетаскивайте, меняйте размер, вращайте.</p>
           <p>3. Выберите платформу, введите ключ стрима и нажмите «Стрим».</p>
+          <button class="btn sm" id="btnRestartOnboarding" style="margin-top:6px">Пройти обучение</button>
           <h3 style="color:var(--accent);margin:16px 0 6px">Горячие клавиши</h3>
           <table style="width:100%;border-collapse:collapse">
             <tr><td style="padding:2px 8px 2px 0;color:var(--text);white-space:nowrap"><kbd>R</kbd></td><td>Сбросить трансформацию</td></tr>
@@ -417,23 +442,27 @@
   </div>
 
   <!-- ONBOARDING WIZARD -->
-  <div id="onboardingOverlay" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(8,8,26,0.92);backdrop-filter:blur(8px);align-items:center;justify-content:center">
-    <div id="onboardingBox" style="background:var(--bg1);border:1.5px solid var(--accent);border-radius:18px;padding:36px 40px;max-width:480px;width:90%;position:relative;box-shadow:0 8px 48px rgba(0,0,0,0.5)">
-      <div id="onboardStepIndicator" style="display:flex;gap:8px;justify-content:center;margin-bottom:24px">
-        <span class="ob-dot ob-dot-0 ob-dot-active"></span>
-        <span class="ob-dot ob-dot-1"></span>
-        <span class="ob-dot ob-dot-2"></span>
-        <span class="ob-dot ob-dot-3"></span>
-      </div>
-      <div id="onboardContent"></div>
-      <div style="display:flex;gap:10px;margin-top:28px;justify-content:flex-end">
-        <button id="onboardSkip" style="background:transparent;border:1px solid var(--muted);color:var(--text2);padding:8px 18px;border-radius:8px;cursor:pointer;font-size:13px">Пропустить</button>
-        <button id="onboardNext" style="background:var(--accent);color:#fff;border:none;padding:9px 24px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">Далее →</button>
+  <div id="onboardingOverlay" style="display:none">
+    <div id="obTooltip" style="display:none">
+      <div id="obArrow"></div>
+      <div id="obStepNum"></div>
+      <div id="obTitle"></div>
+      <p id="obDesc"></p>
+      <div id="obFooter">
+        <label id="obNeverWrap"><input type="checkbox" id="obNeverCb"/> Не показывать снова</label>
+        <div id="obBtns">
+          <button id="obSkip">Пропустить</button>
+          <button id="obNext">Далее →</button>
+        </div>
       </div>
     </div>
   </div>
 
   <script src="js/streaming.js"></script>
+  <script src="js/scene.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/sources.js"></script>
+  <script src="js/ui.js"></script>
   <script src="js/gl-renderer.js"></script>
   <script src="js/webrtc.js"></script>
   <script src="js/coscene.js"></script>

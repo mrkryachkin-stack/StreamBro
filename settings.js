@@ -7,7 +7,8 @@ const fs = require('fs');
 const path = require('path');
 
 // v2 introduces profile / friends / sound / bugReports / updates blocks (1.1.0)
-const SETTINGS_VERSION = 2;
+// v3 introduces p2p block (1.4.0)
+const SETTINGS_VERSION = 3;
 const SETTINGS_FILE = 'settings.json';
 
 const DEFAULT_SETTINGS = {
@@ -45,9 +46,13 @@ const DEFAULT_SETTINGS = {
   },
   // per-source state by name (we cannot rely on stable IDs across restarts):
   fxStateByName: {},
+  camSettingsByName: {},
+  collapsedSections: {},
+  scenePresets: [],
 
   // Onboarding wizard — shown once on first launch
   onboardingComplete: false,
+  onboardingNeverShow: false,
 
   // ─── Profile / account (1.1.0) ───
   // Persistent identity. Without server we keep a local "dev" profile so the
@@ -121,6 +126,11 @@ const DEFAULT_SETTINGS = {
     lastCheckAt: 0,
     skippedVersion: '',      // user pressed "skip this version"
   },
+
+  // ─── P2P co-stream (1.4.0) ───
+  p2p: {
+    roomCode: null,           // saved room code for auto-rejoin after restart
+  },
 };
 
 function getSettingsPath() {
@@ -156,6 +166,12 @@ function _migrate(parsed) {
     }
     if (!parsed.updates) {
       parsed.updates = JSON.parse(JSON.stringify(DEFAULT_SETTINGS.updates));
+    }
+  }
+  // v2 → v3: add p2p block for room auto-rejoin
+  if (parsed.version < 3) {
+    if (!parsed.p2p) {
+      parsed.p2p = JSON.parse(JSON.stringify(DEFAULT_SETTINGS.p2p));
     }
   }
   return parsed;

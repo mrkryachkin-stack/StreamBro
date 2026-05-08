@@ -166,4 +166,23 @@ router.get("/unread/count", authMiddleware, async (req, res) => {
   }
 });
 
+// ─── GET /api/chat/unread/by-sender ──────────────────────
+// Get unread message counts grouped by sender (friendId → count)
+router.get("/unread/by-sender", authMiddleware, async (req, res) => {
+  try {
+    const unread = await req.prisma.message.findMany({
+      where: { receiverId: req.user.id, read: false },
+      select: { senderId: true },
+    });
+    const bySender = {};
+    for (const m of unread) {
+      bySender[m.senderId] = (bySender[m.senderId] || 0) + 1;
+    }
+    res.json(bySender);
+  } catch (err) {
+    console.error("[CHAT] Unread by-sender error:", err);
+    res.status(500).json({ error: "Ошибка" });
+  }
+});
+
 module.exports = { router, setPresence };

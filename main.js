@@ -282,6 +282,7 @@ app.on('before-quit', () => {
   stopSignalingServer();
   stopFFmpegRec();
   stopFFmpegStream();
+  serverApi.presenceDisconnect();
   bugReporter.shutdown();
   autoUpdater.shutdown();
 });
@@ -593,6 +594,10 @@ ipcMain.handle('settings-save', (_event, payload) => {
   for (const key of ['ui', 'audio', 'recording', 'signaling', 'fxStateByName', 'sound', 'updates', 'bugReports']) {
     if (payload[key]) next[key] = { ...(next[key] || {}), ...payload[key] };
   }
+  // Array / object top-level fields from renderer (not deep-merged, replaced wholesale)
+  for (const key of ['friends', 'camSettingsByName', 'collapsedSections', 'scenePresets']) {
+    if (payload[key] !== undefined) next[key] = JSON.parse(JSON.stringify(payload[key]));
+  }
   // Stream object — handle key separately (encrypt)
   if (payload.stream) {
     const incoming = payload.stream;
@@ -605,6 +610,10 @@ ipcMain.handle('settings-save', (_event, payload) => {
     } else if (incoming.clearKey === true) {
       next.stream.keyEncrypted = null;
     }
+  }
+  // Top-level boolean flags from renderer
+  for (const flag of ['onboardingComplete', 'onboardingNeverShow']) {
+    if (payload[flag] != null) next[flag] = !!payload[flag];
   }
   const res = settingsMod.saveSettings(next);
   if (res.success) appSettings = next;
@@ -1018,6 +1027,20 @@ ipcMain.handle('show-in-folder', (event, { path: filePath }) => {
   }
 });
 
+// ─── P2P Debug Log Export (1.4.0) ───
+ipcMain.handle('save-p2p-log', async (event, text) => {
+  try {
+    const desktop = app.getPath('desktop');
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filePath = path.join(desktop, `StreamBro-P2P-log-${ts}.txt`);
+    fs.writeFileSync(filePath, text, 'utf8');
+    shell.showItemInFolder(filePath);
+    return { success: true, path: filePath };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
 // ─── Profile IPC (1.1.0) ───
 ipcMain.handle('profile-get',         () => profileMgr.getPublic());
 ipcMain.handle('profile-update',      (_e, patch) => profileMgr.update(patch));
@@ -1229,21 +1252,8 @@ function _normAvatar(url) {
   return url;
 }
 ipcMain.handle('friends-list',        async () => {
-  const token = profileMgr.getToken();
-  if (token) {
-    const cached = friendsStore.listFriends();
-    if (cached && cached.length > 0) return cached.map(f => ({ ...f, avatar: _normAvatar(f.avatar) }));
-    const r = await serverApi.friendsList();
-    if (r.ok && Array.isArray(r.data)) {
-      return r.data.map(f => ({
-        id: f.id,
-        serverId: f.id,
-        nickname: f.displayName || f.username || 'Друг',
-        avatar: _normAvatar(f.avatarUrl || ''),
-        status: f.status || 'offline',
-      }));
-    }
-  }
+  // Always return cached data instantly — never do HTTP here.
+  // Data freshness is handled by friendsSync() which is called on boot + every 30s.
   return friendsStore.listFriends().map(f => ({ ...f, avatar: _normAvatar(f.avatar) }));
 });
 ipcMain.handle('friends-requests',    async () => {
@@ -1258,7 +1268,7 @@ ipcMain.handle('friends-chat',        async (_e, friendId) => {
 });
 ipcMain.handle('friends-unread',      async () => {
   const token = profileMgr.getToken();
-  if (token) { const r = await serverApi.chatUnread(); if (r.ok) return r.data; }
+  if (token) { const r = await serverApi.chatUnreadBySender(); if (r.ok) return r.data; }
   return friendsStore.getUnreadCounts();
 });
 ipcMain.handle('friends-add',         async (_e, payload) => {
@@ -1287,7 +1297,11 @@ ipcMain.handle('friends-send-msg',    async (_e, payload) => {
 });
 ipcMain.handle('friends-mark-read',   async (_e, friendId) => {
   const token = profileMgr.getToken();
-  if (token) { /* chat/:userId GET already marks as read */ return { ok: true }; }
+  if (token && friendId) {
+    // GET chat/:userId marks unread messages as read on the server
+    try { await serverApi.chatHistory(friendId); } catch (e) {}
+    return { ok: true };
+  }
   return friendsStore.markRead(friendId);
 });
 ipcMain.handle('chat-edit',          async (_e, { messageId, content }) => {
@@ -1312,6 +1326,8 @@ ipcMain.handle('rooms-leave',        (_e, code) => serverApi.roomsLeave(code));
 ipcMain.handle('rooms-get',          (_e, code) => serverApi.roomsGet(code));
 ipcMain.handle('rooms-list',         () => serverApi.roomsList());
 ipcMain.handle('rooms-invite',       (_e, { code, friendId }) => serverApi.roomsInvite(code, friendId));
+ipcMain.handle('rooms-rename',       (_e, { code, name }) => serverApi.roomsRename(code, name));
+ipcMain.handle('rooms-delete',       (_e, code) => serverApi.roomsDelete(code));
 
 // ─── Cloud settings IPC ───
 ipcMain.handle('cloud-settings-get',    () => cloudSync.download());
@@ -1331,7 +1347,7 @@ ipcMain.handle('presence-disconnect', () => serverApi.presenceDisconnect());
 ipcMain.handle('presence-set-status', (_e, status) => serverApi.presenceSetStatus(status));
 ipcMain.handle('presence-send',       (_e, msgJson) => serverApi.presenceSend(msgJson));
 ipcMain.handle('get-turn-credentials', async () => {
-  const token = profileManager.getToken();
+  const token = profileMgr.getToken();
   if (!token) return { error: 'not authenticated' };
   try {
     const result = await serverApi.getTurnCredentials();

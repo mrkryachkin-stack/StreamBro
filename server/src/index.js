@@ -108,6 +108,7 @@ app.set("presenceServer", presence);
 friendsRoutes.setPresence(presence);
 adminRoutes.setPresence(presence);
 chatRoutes.setPresence(presence);
+roomsRoutes.setPresence(presence);
 
 // Initialize AI bot (needs prisma + presence for responding + push)
 aiBot.init(prisma, presence);
@@ -312,6 +313,22 @@ async function start() {
     await prisma.$connect();
     console.log("[DB] PostgreSQL connected");
     await _ensureSupportUser();
+    // Reset all user statuses to "offline" on startup — stale statuses from previous session
+    // Exception: StreamBro support user is always online
+    try {
+      const result = await prisma.user.updateMany({
+        where: { status: { not: "offline" }, role: { not: "SUPPORT" } },
+        data: { status: "offline" },
+      });
+      if (result.count > 0) console.log(`[DB] Reset ${result.count} user(s) to offline (stale from previous session)`);
+      // Ensure support user stays online
+      await prisma.user.updateMany({
+        where: { role: "SUPPORT" },
+        data: { status: "online" },
+      });
+    } catch (e) {
+      console.error("[DB] Status reset error:", e.message);
+    }
     await _initAiBot();
     server.listen(PORT, () => {
       console.log(`[API] StreamBro server running on :${PORT}`);

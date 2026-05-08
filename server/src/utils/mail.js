@@ -56,6 +56,7 @@ async function sendVerificationEmail(email, verifyToken) {
         <p style="margin:0 0 1rem;color:#374151">Нажмите кнопку ниже, чтобы подтвердить ваш email:</p>
         <a href="${verifyUrl}" style="display:inline-block;background:#8b5cf6;color:#fff;padding:0.75rem 1.5rem;border-radius:8px;text-decoration:none;font-weight:600">Подтвердить email</a>
       </div>
+      <p style="color:#f59e0b;font-size:0.85rem;margin:0 0 0.5rem">&#9888; Не нашли письмо? Проверьте папку «Спам» или «Нежелательная почта».</p>
       <p style="color:#9ca3af;font-size:0.8rem;margin:0">Если вы не регистрировались на StreamBro, проигнорируйте это письмо.</p>
       <p style="color:#9ca3af;font-size:0.75rem;margin:0.5rem 0 0">Ссылка действительна 24 часа.</p>
     </div>
@@ -74,6 +75,7 @@ async function sendResetEmail(email, resetToken) {
         <p style="margin:0 0 1rem;color:#374151">Нажмите кнопку ниже, чтобы установить новый пароль:</p>
         <a href="${resetUrl}" style="display:inline-block;background:#8b5cf6;color:#fff;padding:0.75rem 1.5rem;border-radius:8px;text-decoration:none;font-weight:600">Сбросить пароль</a>
       </div>
+      <p style="color:#f59e0b;font-size:0.85rem;margin:0 0 0.5rem">&#9888; Не нашли письмо? Проверьте папку «Спам» или «Нежелательная почта».</p>
       <p style="color:#9ca3af;font-size:0.8rem;margin:0">Если вы не запрашивали сброс пароля, проигнорируйте это письмо.</p>
       <p style="color:#9ca3af;font-size:0.75rem;margin:0.5rem 0 0">Ссылка действительна 1 час.</p>
     </div>

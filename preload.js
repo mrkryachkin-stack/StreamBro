@@ -96,6 +96,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   roomsGet:            (code) => ipcRenderer.invoke('rooms-get', code),
   roomsList:           () => ipcRenderer.invoke('rooms-list'),
   roomsInvite:         (code, friendId) => ipcRenderer.invoke('rooms-invite', { code, friendId }),
+  roomsRename:         (code, name) => ipcRenderer.invoke('rooms-rename', { code, name }),
+  roomsDelete:         (code) => ipcRenderer.invoke('rooms-delete', code),
 
   // ─── Cloud settings sync ───
   cloudSettingsGet:    () => ipcRenderer.invoke('cloud-settings-get'),
@@ -118,6 +120,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTurnCredentials: () => ipcRenderer.invoke('get-turn-credentials'),
   onPresenceUpdate:    (cb) => ipcRenderer.on('presence-update', (_, data) => cb(data)),
   onPresenceSignal:   (cb) => ipcRenderer.on('presence-signal', (_, data) => cb(data)),
+  onPresenceReconnect:(cb) => ipcRenderer.on('presence-reconnect', () => cb()),
   onChatEdit:         (cb) => ipcRenderer.on('friends-chat-edit', (_, data) => cb(data)),
   onChatDelete:       (cb) => ipcRenderer.on('friends-chat-delete', (_, data) => cb(data)),
 
@@ -142,4 +145,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   vcamWriteChunk:   (chunk) => ipcRenderer.invoke('vcam-write-chunk', chunk),
   onVcamError:      (cb) => ipcRenderer.on('vcam-error', (_, msg) => cb(msg)),
   onVcamStatus:     (cb) => ipcRenderer.on('vcam-status-change', (_, data) => cb(data)),
+
+  // ─── P2P Debug (1.4.0) ───
+  saveP2pLog:       (text) => ipcRenderer.invoke('save-p2p-log', text),
 });

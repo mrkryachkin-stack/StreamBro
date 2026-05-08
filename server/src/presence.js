@@ -28,12 +28,16 @@ class PresenceServer {
         this._handleMessage(ws, msg);
       });
 
-      ws.on("close", () => {
+      ws.on("close", async () => {
         if (ws.userId) {
           this.connections.delete(ws.userId);
           this.userStatus.delete(ws.userId);
-          this._broadcastPresence(ws.userId, "offline");
-          this._updateDbStatus(ws.userId, "offline");
+          // Don't set support users offline — they're always online
+          const isSupport = await this._isSupportUser(ws.userId);
+          if (!isSupport) {
+            this._broadcastPresence(ws.userId, "offline");
+            this._updateDbStatus(ws.userId, "offline");
+          }
         }
       });
 
@@ -324,6 +328,16 @@ class PresenceServer {
 
   getStatus(userId) {
     return this.userStatus.get(userId) || "offline";
+  }
+
+  async _isSupportUser(userId) {
+    if (!this.prisma) return false;
+    try {
+      const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { role: true } });
+      return user && user.role === "SUPPORT";
+    } catch {
+      return false;
+    }
   }
 }
 

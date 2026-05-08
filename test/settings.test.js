@@ -95,7 +95,7 @@ assert(migrated.stream.platform === 'kick', 'v1→v2: stream.platform preserved'
 assert(migrated.profile && migrated.profile.statusManual === 'online', 'v1→v2: profile section added');
 assert(migrated.sound && typeof migrated.sound.volume === 'number', 'v1→v2: sound section added');
 assert(migrated.updates && migrated.updates.channel === 'latest', 'v1→v2: updates section added');
-assert(migrated.version === 2, 'v1→v2: version bumped');
+assert(migrated.version === 3, 'v1→v3: version bumped');
 
 // Cleanup
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) {}

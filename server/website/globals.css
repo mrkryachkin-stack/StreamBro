@@ -743,3 +743,79 @@ a { color: inherit; text-decoration: none; }
   font-display: swap;
   src: url("https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKotuK.woff2") format("woff2");
 }
+
+/* ══════════════════════════════════════════════════════════════
+   STUDIO PAGE
+   ══════════════════════════════════════════════════════════════ */
+
+/* Hide body noise texture in studio (performance) */
+body.studio-body::after { display: none !important; }
+
+/* Studio-specific overrides */
+.studio-select {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.78rem;
+  border-radius: var(--r-sm);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  color: var(--text-0);
+  cursor: pointer;
+  font-family: inherit;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%23c9a227' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  padding-right: 1.5rem;
+}
+.studio-select:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px rgba(201,162,39,0.1);
+}
+
+.studio-input {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.78rem;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-0);
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+.studio-input:focus {
+  border-color: var(--gold);
+  background: rgba(201,162,39,0.04);
+}
+.studio-input::placeholder { color: var(--text-2); }
+
+/* Range slider styling for studio */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.08);
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--gold);
+  cursor: pointer;
+  border: 2px solid var(--bg-0);
+  box-shadow: 0 0 4px rgba(201,162,39,0.3);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--gold);
+  cursor: pointer;
+  border: 2px solid var(--bg-0);
+}

@@ -185,9 +185,12 @@ function Navbar() {
 
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {loggedIn ? (
-            <Link href="/dashboard" className="btn-ghost" style={{ padding: "0.5rem 1.2rem", fontSize: "0.83rem" }}>
-              Мой профиль
-            </Link>
+            <>
+              <Link href="/studio" className="btn-ghost" style={{ padding: "0.5rem 1.2rem", fontSize: "0.83rem", borderColor: "rgba(201,162,39,0.2)", color: "var(--gold)" }}>Студия</Link>
+              <Link href="/dashboard" className="btn-ghost" style={{ padding: "0.5rem 1.2rem", fontSize: "0.83rem" }}>
+                Мой профиль
+              </Link>
+            </>
           ) : (
             <>
               <Link href="/login" className="btn-ghost" style={{ padding: "0.5rem 1.2rem", fontSize: "0.83rem" }}>Войти</Link>
@@ -209,7 +212,10 @@ function Navbar() {
             <a key={href} href={href}>{label}</a>
           ))}
           {loggedIn ? (
-            <Link href="/dashboard" onClick={() => setMobileOpen(false)}>Мой профиль</Link>
+            <>
+              <Link href="/studio" onClick={() => setMobileOpen(false)} style={{ color: "var(--gold)" }}>Студия</Link>
+              <Link href="/dashboard" onClick={() => setMobileOpen(false)}>Мой профиль</Link>
+            </>
           ) : (
             <>
               <Link href="/login" onClick={() => setMobileOpen(false)}>Войти</Link>

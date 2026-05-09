@@ -253,6 +253,21 @@ export default function DashboardPage() {
         </Link>
 
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          {/* Open Studio button */}
+          <Link href="/studio" style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "0.4rem 1rem", fontSize: "0.82rem", borderRadius: "var(--r-sm)",
+            background: "rgba(201,162,39,0.1)", border: "1px solid rgba(201,162,39,0.25)",
+            color: "var(--gold)", fontWeight: 600, textDecoration: "none",
+            transition: "all 0.2s ease", fontFamily: "inherit",
+          }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(201,162,39,0.18)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(201,162,39,0.4)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(201,162,39,0.1)"; (e.currentTarget as HTMLElement).style.borderColor = "rgba(201,162,39,0.25)"; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+            Студия
+          </Link>
+
           {/* User info */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ position: "relative" }}>
@@ -308,6 +323,24 @@ export default function DashboardPage() {
                 {tab.label}
               </button>
             ))}
+          </div>
+
+          {/* Studio link */}
+          <div style={{ marginTop: "1.25rem", paddingTop: "1rem", borderTop: "1px solid var(--border)" }}>
+            <Link href="/studio" className="dash-tab" style={{
+              display: "flex", alignItems: "center", gap: "0.6rem",
+              padding: "0.65rem 1.1rem", fontSize: "0.875rem", textAlign: "left",
+              borderRadius: "var(--r-sm)", border: "none", cursor: "pointer",
+              background: "rgba(201,162,39,0.08)", color: "var(--gold)",
+              fontWeight: 600, fontFamily: "inherit", textDecoration: "none",
+              transition: "all 0.2s ease",
+            }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(201,162,39,0.15)"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(201,162,39,0.08)"; }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+              Студия
+            </Link>
           </div>
         </nav>
 

@@ -53,6 +53,7 @@ StreamBro-*-portable.zip
 # - Deploy scripts with secrets (NEVER commit these) -
 tmp_*.py
 deploy_icons.py
+deploy_studio.sh
 _deploy.py
 _check*.py
 _verify.py

@@ -94,6 +94,7 @@ const adminRoutes = require("./routes/admin");
 
 const PresenceServer = require("./presence");
 const aiBot = require("./ai-bot");
+const { initRelayServer } = require("./routes/relay");
 
 const app = express();
 const server = http.createServer(app);
@@ -103,6 +104,9 @@ const PORT = process.env.PORT || 3001;
 const presence = new PresenceServer(server);
 presence.setPrisma(prisma);
 app.set("presenceServer", presence);
+
+// ─── RTMP Relay WebSocket ──────────────────────────────────
+initRelayServer(server);
 
 // Inject presence server into routes that need push notifications
 friendsRoutes.setPresence(presence);

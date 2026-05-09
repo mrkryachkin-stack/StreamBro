@@ -4448,7 +4448,7 @@ function _hideActiveRoom(){
 }
 async function _exportP2pLog(){
   const header='StreamBro P2P Debug Log\n'+
-    'Version: '+navigator.userAgent.match(/StreamBro\/([\d.]+)/)?.[1]+' (1.4.0-beta11)\n'+
+    'Version: '+navigator.userAgent.match(/StreamBro\/([\d.]+)/)?.[1]+' (1.4.0-beta12)\n'+
     'Date: '+new Date().toISOString()+'\n'+
     'Room: '+(S.roomCode||'none')+'\n'+
     'Sources: '+S.srcs.map(s=>s.name+'('+s.type+(s.isPeer?',peer':'')+')').join(', ')+'\n'+

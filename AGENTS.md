@@ -1,6 +1,6 @@
 # StreamBro — Knowledge Base for AI Agents
 
-> Последнее обновление: 2026-05-09 (1.4.0-beta10 — P2P: диагностика через логи, выявлена асимметрия сессий — CoScene работает только когда обе стороны используют build3+)
+> Последнее обновление: 2026-05-09 (1.4.0-beta12 — P2P: peer audio мониторинг через <audio> элемент вместо Web Audio API)
 > Этот файл — «память» проекта. Новый агент должен прочитать его целиком перед началом работы.
 
 ---
@@ -1688,4 +1688,62 @@ if(t.kind==='audio' && !t.muted){
 
 **Билды:**
 - `StreamBro-1.4.0-beta11-build1-portable.zip` (234 MB) — missed-unmute fix + peer audio logging
+
+---
+
+## 26. Выполнено (1.4.0-beta12 — 2026-05-09)
+
+### Peer audio мониторинг через `<audio>` элемент (критичный рефакторинг)
+
+**Проблема:** `createMediaStreamSource(stream)` для WebRTC remote tracks в Electron ненадёжен.
+Даже когда трек `muted=false/readyState=live`, Web Audio API иногда не получает PCM-данные от RTP декодера Chromium в рамках Electron. Симптом: FX цепочка собирается корректно, analyser показывает `peak=0`, звук не слышен.
+
+**Решение:** для peer источников (`src.isPeer=true`) мониторинг переведён с Web Audio API на `<audio autoplay>` HTML элемент:
+
+**Было:**
+```
+WebRTC remote track → createMediaStreamSource → monitorGain → ctx.destination
+```
+**Стало:**
+```
+WebRTC remote track → <audio autoplay srcObject=stream> → системный вывод
+WebRTC remote track → createMediaStreamSource → gainNode → audioDest (RTMP/запись)
+                                              → analyser (dB-метры)
+```
+
+**Что изменено в `renderer/js/audio.js`:**
+
+1. **`_connectSource`** — для `src.isPeer`:
+   - Не подключает `monitorGain → ctx.destination`
+   - Создаёт `<audio autoplay>` элемент с `srcObject=src.stream`
+   - Элемент добавляется в DOM (required для autoplay policy)
+   - Стили: `position:absolute;width:0;height:0;opacity:0;pointer-events:none`
+   - Громкость: `src.vol` (или `Math.min(vol, 0.5)` при активном WASAPI + peer mic)
+   - Ссылка хранится в `audioNodes.peerAudioEl`
+   - Логирует создание в `_p2pLog`
+
+2. **`_disconnectSource`** — cleanup: `pause() + srcObject=null + remove()`
+
+3. **`_updateGain`** — для peer источников обновляет `peerAudioEl.volume/muted` вместо `monitorGain.gain`
+
+4. **`_updatePeerMonitorRouting`** — обновляет `peerAudioEl.volume` при изменении WASAPI state
+
+5. **Early return** — при повторном `_connectSource` обновляет `peerAudioEl.volume` если уже создан
+
+6. **Level check 3s** — всегда логирует analyser_peak в `_p2pLog` (убран gate `__sbDev`)
+
+**Web Audio цепочка для peer сохраняется** для:
+- `gainNode → audioDest` — peer аудио идёт в RTMP/запись
+- `analyser` — dB-метры в UI
+
+**Важно:** FX эффекты (gate, EQ, компрессор) по-прежнему применяются к RTMP/записи peer аудио. Но для мониторинга (слышимость в наушниках) — используется сырой stream напрямую через `<audio>`.
+
+**Правила для агентов:**
+178. **Peer audio мониторинг — через `<audio>` элемент.** `createMediaStreamSource` сохраняется только для RTMP/записи и dB-метров. Для мониторинга (слышимости) peer аудио используется `<audio autoplay srcObject=src.stream>`. НЕ реверти к `monitorGain → ctx.destination` для peer источников.
+179. **`audioNodes.peerAudioEl`** — поле присутствует только для peer источников. Для локальных источников `peerAudioEl = null`. `_updateGain` и `_updatePeerMonitorRouting` проверяют его наличие через `if(n.peerAudioEl)`.
+180. **`<audio>` элемент в DOM** — обязателен для autoplay policy. Стили делают его невидимым. Удаляется через `.remove()` в `_disconnectSource`. Утечка DOM-элементов при непарных connect/disconnect = медиа утечка памяти.
+181. **analyser_peak в Level check 3s** — теперь всегда логируется в `_p2pLog` (убран `window.__sbDev` gate). Если `analyser_peak=0` при `muted=false` треке → Web Audio не получает данные от RTP (Сценарий B из beta11 анализа). Если при этом через `<audio>` звук есть — проблема именно в `createMediaStreamSource`.
+
+**Билды:**
+- `StreamBro-1.4.0-beta12-portable.zip` (234 MB) — peer audio via `<audio>` element
 

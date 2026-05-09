@@ -103,6 +103,11 @@ const SBAudio = {
       const n=S.audioNodes.get(src.id);
       n.gainNode.gain.value=src.muted?0:src.vol;
       n.monitorGain.gain.value=src.monitor?(src.muted?0:src.vol):0;
+      if(n.peerAudioEl){
+        const _pm=src.isPeer&&src.type==='mic'; const _wa=!!S.desktopAudioId;
+        n.peerAudioEl.muted=!!(src.muted);
+        n.peerAudioEl.volume=src.muted?0:(_pm&&_wa?Math.min(src.vol,0.5):(src.vol||1));
+      }
       return;
     }
     if(!src.stream.getAudioTracks().length) return;
@@ -221,34 +226,47 @@ const SBAudio = {
 
     limiter.connect(gainNode); gainNode.connect(S.audioDest); gainNode.connect(analyser);
     // Monitor routing:
-    // - Local desktop (WASAPI) → NEVER monitor (captures speakers → echo)
-    // - Peer mic/desktop → ALWAYS monitor (user needs to hear friend)
-    //   If WASAPI is active, peer mic uses reduced gain to prevent
-    //   potential feedback loop (friend's voice → our speakers → WASAPI → back to friend)
-    // - Local mic / other → ALWAYS monitor (user's own mic to headphones is fine)
+    // - Peer sources → <audio autoplay> element (bypasses Web Audio pipeline;
+    //   createMediaStreamSource is unreliable for WebRTC remote tracks in Electron/Chrome)
+    // - Local mic / other local → Web Audio monitorGain → ctx.destination
+    // - Local desktop (WASAPI) → NEVER monitored (would create echo loop)
     const isLocalDesktop = !src.isPeer && src.type==='desktop';
     const isPeerMic = src.isPeer && src.type==='mic';
     const wasapiActive = !!S.desktopAudioId;
-    const shouldMonitor = !isLocalDesktop;
-    if(shouldMonitor){
+    let peerAudioEl = null;
+    if(src.isPeer){
+      // Direct <audio> playback for peer — most reliable cross-platform approach
+      peerAudioEl = document.createElement('audio');
+      peerAudioEl.srcObject = src.stream;
+      peerAudioEl.autoplay = true;
+      peerAudioEl.muted = !!(src.muted);
+      // Reduce peer mic volume when WASAPI is active (feedback prevention)
+      peerAudioEl.volume = src.muted ? 0 : (isPeerMic && wasapiActive ? Math.min(src.vol||1, 0.5) : (src.vol||1));
+      // Must be in DOM for autoplay policy compliance in Electron
+      peerAudioEl.style.cssText='position:absolute;width:0;height:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(peerAudioEl);
+      peerAudioEl.play().catch(e=>{
+        if(typeof _p2pLog==='function') _p2pLog('[Audio] Peer <audio>.play() failed: '+e.message);
+      });
+      if(typeof _p2pLog==='function') _p2pLog('[Audio] Peer audio element created: '+src.name+' vol='+peerAudioEl.volume.toFixed(2)+' muted='+peerAudioEl.muted);
+    } else if(!isLocalDesktop){
+      // Local mic/camera: standard Web Audio monitoring
       limiter.connect(monitorGain);
       monitorGain.connect(ctx.destination);
-      // Reduce peer mic monitor volume when WASAPI is active to prevent feedback
-      if(isPeerMic && wasapiActive){
-        monitorGain.gain.setTargetAtTime(src.muted?0:Math.min(src.vol,0.5),ctx.currentTime,0.02);
-      }
+    } else {
+      // Local desktop: no monitoring
+      if(src.monitor) src.monitor=false;
     }
-    else if(src.monitor){ src.monitor=false; } // disable monitor flag to match actual routing
 
     S.audioNodes.set(src.id,{sourceNode,gainNode,monitorGain,analyser,
-      effectsChain:{gateNode,eqLow,eqMid,eqHigh,compressor,compMakeup,limiter},rawSource,splitter});
+      effectsChain:{gateNode,eqLow,eqMid,eqHigh,compressor,compMakeup,limiter},rawSource,splitter,peerAudioEl});
     S.audioEffects.set(src.id,fxState);
     src.fxState=fxState;
     if(window.__sbDev) console.log('[Audio] Connected with FX chain:',src.name);
     if(typeof _p2pLog==='function') _p2pLog('[Audio] Connected with FX chain: '+src.name);
 
     // For peer audio: schedule a delayed check to see if audio is actually flowing
-    if(src.isPeer && window.__sbDev){
+    if(src.isPeer){
       setTimeout(()=>{
         if(!S.audioNodes.has(src.id)) return;
         const an=S.audioNodes.get(src.id).analyser;
@@ -256,8 +274,9 @@ const SBAudio = {
         an.getByteFrequencyData(data);
         const peak=Math.max(...data);
         const tracks=src.stream.getAudioTracks();
-        console.log('[Audio] Peer audio level check (3s):',src.name,
-          'peak='+peak,'muted='+tracks.map(t=>t.muted).join(','),'readyState='+tracks.map(t=>t.readyState).join(','));
+        const stateStr=tracks.map(t=>t.readyState+'/muted='+t.muted).join(',');
+        if(typeof _p2pLog==='function') _p2pLog('[Audio] Level check 3s: '+src.name+' analyser_peak='+peak+' tracks='+stateStr);
+        if(window.__sbDev) console.log('[Audio] Peer audio level check (3s):',src.name,'peak='+peak,stateStr);
       },3000);
     }
   },
@@ -280,6 +299,9 @@ const SBAudio = {
     }
     if(n.rawSource) try{n.rawSource.disconnect();}catch(e){}
     if(n.splitter) try{n.splitter.disconnect();}catch(e){}
+    if(n.peerAudioEl){
+      try{n.peerAudioEl.pause();n.peerAudioEl.srcObject=null;n.peerAudioEl.remove();}catch(e){}
+    }
     const rnNode=S._rnnoiseNodes.get(srcId);
     if(rnNode){try{rnNode.disconnect();}catch(e){}S._rnnoiseNodes.delete(srcId);}
     S.audioNodes.delete(srcId);
@@ -292,11 +314,17 @@ const SBAudio = {
     const n=S.audioNodes.get(src.id);if(!n||!S.audioCtx)return;
     const ctx=S.audioCtx;
     n.gainNode.gain.setTargetAtTime(src.muted?0:src.vol,ctx.currentTime,0.02);
-    // Monitor: peer mic gets reduced volume when WASAPI is active
-    const isPeerMic=src.isPeer&&src.type==='mic';
-    const wasapiActive=!!S.desktopAudioId;
-    const monVol=src.monitor?(src.muted?0:(isPeerMic&&wasapiActive?Math.min(src.vol,0.5):src.vol)):0;
-    n.monitorGain.gain.setTargetAtTime(monVol,ctx.currentTime,0.02);
+    if(n.peerAudioEl){
+      // Peer sources: control volume via <audio> element
+      const isPeerMic=src.isPeer&&src.type==='mic';
+      const wasapiActive=!!S.desktopAudioId;
+      n.peerAudioEl.muted=!!(src.muted);
+      n.peerAudioEl.volume=src.muted?0:(isPeerMic&&wasapiActive?Math.min(src.vol,0.5):src.vol);
+    } else {
+      // Local sources: control via monitorGain
+      const monVol=src.monitor?(src.muted?0:src.vol):0;
+      n.monitorGain.gain.setTargetAtTime(monVol,ctx.currentTime,0.02);
+    }
   },
 
   // ─── Re-evaluate monitor routing when WASAPI state changes ───
@@ -308,15 +336,18 @@ const SBAudio = {
       if(!src.isPeer) continue;
       const n=S.audioNodes.get(src.id);
       if(!n) continue;
-      // Peer sources are ALWAYS monitored (user needs to hear friend).
-      // When WASAPI is active, peer mic gets reduced volume (0.5 max)
-      // to prevent potential feedback loop.
       const isPeerMic=src.type==='mic';
-      src.monitor=true;
       const vol=src.muted?0:(isPeerMic&&wasapiActive?Math.min(src.vol,0.5):src.vol);
-      n.monitorGain.gain.setTargetAtTime(vol,S.audioCtx.currentTime,0.02);
-      if(window.__sbDev) console.log('[Audio] Monitor routing:',src.name,'monitor=true','vol='+vol.toFixed(2),'(wasapiActive='+wasapiActive+',isPeerMic='+isPeerMic+')');
-      if(typeof _p2pLog==='function') _p2pLog('[Audio] Monitor routing: '+src.name+' monitor=true vol='+vol.toFixed(2)+' (wasapiActive='+wasapiActive+',isPeerMic='+isPeerMic+')');
+      if(n.peerAudioEl){
+        // Peer sources use <audio> element — update its volume directly
+        n.peerAudioEl.muted=!!(src.muted);
+        n.peerAudioEl.volume=vol;
+      } else {
+        n.monitorGain.gain.setTargetAtTime(vol,S.audioCtx.currentTime,0.02);
+      }
+      src.monitor=true;
+      if(window.__sbDev) console.log('[Audio] Peer monitor routing:',src.name,'vol='+vol.toFixed(2),'wasapi='+wasapiActive);
+      if(typeof _p2pLog==='function') _p2pLog('[Audio] Peer monitor routing: '+src.name+' vol='+vol.toFixed(2)+' wasapi='+wasapiActive);
     }
   },
 
